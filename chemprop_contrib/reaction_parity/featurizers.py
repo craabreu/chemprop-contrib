@@ -8,9 +8,11 @@ trailing ``d`` column block and leaves ``s`` untouched.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import InitVar, dataclass
 from typing import Iterable
 
+from chemprop.data.collate import BatchMolGraph
 from chemprop.featurizers.molgraph.reaction import (
     CondensedGraphOfReactionFeaturizer,
     RxnMode,
@@ -94,3 +96,30 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
         Bb = self.odd_bond_start
         x_e[:Bb] += 0.5 * x_e[Bb:]
         return x_e
+
+
+def reverse_bmg(bmg: BatchMolGraph, odd_atom_start: int, odd_bond_start: int) -> BatchMolGraph:
+    """Reverse every reaction in a batch by negating the odd feature blocks.
+
+    In the ``(s, d)`` basis reversal is ``d -> -d`` with ``s`` unchanged, and the graph
+    topology is identical, so ``edge_index``, ``rev_edge_index`` and ``batch`` are shared
+    with the input. The input is not modified.
+
+    Parameters
+    ----------
+    bmg : BatchMolGraph
+        batch featurized with :class:`ParityCGRFeaturizer`
+    odd_atom_start : int
+        first node-feature column of the odd block
+    odd_bond_start : int
+        first edge-feature column of the odd block
+    """
+    V = bmg.V.clone()
+    E = bmg.E.clone()
+    V[:, odd_atom_start:] *= -1
+    E[:, odd_bond_start:] *= -1
+
+    out = copy.copy(bmg)
+    out.V = V
+    out.E = E
+    return out
