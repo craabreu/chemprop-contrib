@@ -301,7 +301,7 @@ def test_encoding_is_unchanged(): ...
 def test_rejects_nonzero_odd_task_target_mean(): ...
     # Review Focus 2: UnscaleTransform with mean != 0 on an odd column -> ValueError
 def test_zero_mean_odd_task_is_unbiased(): ...
-    # with_mean=False on odd columns: eval prediction has no -mu offset
+    # scaler with mean_[odd_cols] = 0.0 (not with_mean=False): eval prediction has no -mu offset
 def test_rejects_non_identity_graph_transform(): ...        # Review Focus 4
 def test_extra_descriptors_reach_both_passes(): ...
 def test_v_d_is_forwarded_to_both_passes(): ...
@@ -470,7 +470,7 @@ Expected: PASS, with no other package's tests broken.
 
 - [ ] **Step 5: Write `reaction_parity/README.md`**
 
-Covers: the physical motivation, leading with antisymmetry since that is what readers will search for; the parity table with example targets (ΔH odd, reorganization energy even, `Ea` free); a minimal end-to-end example via `from_featurizer`; **the `with_mean=False` requirement for odd-task targets**, which is a silent bias if missed; the **eval-only** exactness caveat; that `fingerprint` returns the direction-dependent forward half; unsupported combinations (predictors outside the allowlist, non-identity `graph_transform`, cuik-molmaker); and the deferred coupled ΔH/Ea recipe `Ea_fwd = B + ΔH/2`, `Ea_rev = B − ΔH/2` as future work.
+Covers: the physical motivation, leading with antisymmetry since that is what readers will search for; the parity table with example targets (ΔH odd, reorganization energy even, `Ea` free); a minimal end-to-end example via `from_featurizer`; **the zero-mean-scaler requirement for odd-task targets** (fit `StandardScaler`, set `scaler.mean_[odd_cols] = 0.0`, then normalize and build the transform; `with_mean=False` does not work), which is a silent bias if missed; the **eval-only** exactness caveat; that `fingerprint` returns the direction-dependent forward half; unsupported combinations (predictors outside the allowlist, non-identity `graph_transform`, cuik-molmaker); and the deferred coupled ΔH/Ea recipe `Ea_fwd = B + ΔH/2`, `Ea_rev = B − ΔH/2` as future work.
 
 - [ ] **Step 6: Commit**
 

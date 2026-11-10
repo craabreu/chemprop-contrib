@@ -116,8 +116,10 @@ The mean cancels, so **every odd-task prediction is biased by −μ**. Confirmed
 review.
 
 **Requirement:** odd-task columns of the target scaler must have `mean == 0` — fit with
-`StandardScaler(with_mean=False)` on those columns, or zero them after fitting. The model validates
-this at construction (R7). Even and free tasks are unaffected and keep their means.
+`StandardScaler` and then set `scaler.mean_[odd_cols] = 0.0`, call `normalize_targets(scaler)` on
+each dataset, and build the transform with `UnscaleTransform.from_standard_scaler(scaler)`.
+`StandardScaler(with_mean=False)` does not work: sklearn still sets `mean_`, and
+`from_standard_scaler` copies it. The model validates this at construction (R7). Even and free tasks are unaffected and keep their means.
 
 `on_validation_model_eval` (`models/model.py:163-168`) explicitly puts `output_transform` back into
 train mode, so validation loss is computed in scaled space, consistently with training.
