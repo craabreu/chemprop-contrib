@@ -15,6 +15,7 @@
 - chemprop `>= 2.3.1`; Python `>= 3.11`. Verified against chemprop at `1b90e3e2`.
 - **No new dependencies.** torch, numpy, chemprop, rdkit only. `pyproject.toml` is not modified.
 - **No modifications to core chemprop.** Everything by subclassing.
+- **Self-contained.** The `(s,d)` layout and everything else stays in `chemprop_contrib/reaction_parity/`; no upstream issue, PR or `RxnMode` proposal is part of this work.
 - All code under `chemprop_contrib/reaction_parity/`. MIT licence.
 - Parity constants: `ODD = -1`, `EVEN = 1`, `FREE = 0`.
 - Every parity assertion runs after `model.eval()`. `ScaleTransform`, `UnscaleTransform` and `GraphTransform` all short-circuit to identity while `self.training` is True, so a train-mode assertion can pass for unrelated reasons.
@@ -24,7 +25,7 @@
 - `AVAILABLE_RXN_MODE_NAMES` lives in chemprop's *test* tree and is not importable from an install — use `RxnMode.keys()`.
 - End every commit message with:
   ```
-  Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01MYqeKqjp62cW5TbGdfp7MD
   ```
 
@@ -484,4 +485,4 @@ git commit -m "docs: add reaction_parity README, licence and exports"
 
 The spec's §9 A/B benchmark is **not** part of this plan — it depends on a dataset choice, and the unit tests establish correctness without it. Run it before opening the PR if the PR is to make an empirical claim; open the PR as a correctness-only contribution otherwise.
 
-Spec §11 recommends opening an issue against `chemprop/chemprop` about upstreaming the `(s,d)` layout as a seventh `RxnMode` before Task 2 starts.
+The work is self-contained in chemprop-contrib (spec §11). Do not open issues or PRs against `chemprop/chemprop`, and do not propose the `(s,d)` layout as a core `RxnMode`; nothing in this plan waits on upstream.

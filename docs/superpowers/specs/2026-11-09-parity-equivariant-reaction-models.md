@@ -428,6 +428,9 @@ not degenerate.
 
 Submission follows the contrib convention: fork, branch, PR using the provided template.
 
-**Recommended before writing code:** open an issue against `chemprop/chemprop` asking whether the
-maintainers want the `(s,d)` layout upstreamed as a seventh `RxnMode` — it is useful independently
-of parity — with the model staying in contrib. The subclassing design means a "no" costs nothing.
+**Self-contained in chemprop-contrib.** The `(s,d)` layout, the reversal operator and the model all
+live in `chemprop_contrib/reaction_parity/` and stay there. Nothing is proposed upstream: no new
+`RxnMode`, no issue against `chemprop/chemprop`, and no step of this work waits on core
+maintainers. The package depends on core only through public subclassing of
+`CondensedGraphOfReactionFeaturizer` and `MPNN`, and `test_core_symmetry.py` detects any core change
+that would invalidate that.
