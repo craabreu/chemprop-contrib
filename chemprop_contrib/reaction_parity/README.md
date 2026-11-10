@@ -1,6 +1,6 @@
 # `reaction_parity`
 
-This `chemprop-contrib` package makes reaction-property predictions **exactly antisymmetric (or symmetric) under reaction reversal**, using the Condensed Graph of Reaction (CGR).
+This `chemprop-contrib` package makes reaction-property predictions **exactly antisymmetric (or symmetric) under reaction reversal**, using the Condensed Graph of Reaction (CGR). The same holds for alchemical transformations between two molecules, such as phenol → toluene, of which chemical reactions are a special case.
 
 Thermochemical quantities such as the reaction enthalpy, free energy or energy satisfy
 
@@ -18,7 +18,7 @@ A standard Chemprop reaction model satisfies this only by accident, and nothing 
 
 ## How it works
 
-1. `ParityCGRFeaturizer` emits CGR features in an `(s, d)` basis, with `s` the mean of the reactant-side and product-side features and `d` their difference. In this basis, reversing a reaction is a sign flip on the contiguous `d` block, so no second featurization is needed. It is an invertible linear map of Chemprop's `REAC_DIFF` features, so no information is lost.
+1. `ParityCGRFeaturizer` emits CGR features in an `(s, d)` basis, with `s` the mean of the reactant-side and product-side features and `d` their difference. In this basis, reversing a reaction is a sign flip on the contiguous `d` block, so no second featurization is needed. Every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)).
 2. `ParityEquivariantMPNN` runs the same network (shared weights) on the batch and on its reversal (`reverse_bmg`), then combines the outputs per task: `½[g(x) − g(x̄)]` for odd, `½[g(x) + g(x̄)]` for even, `g(x)` for free. The guarantee holds for any network `g`.
 
 The cost is two forward passes per batch.
@@ -83,9 +83,25 @@ preds = trainer.predict(model, val_loader)  # list of (batch, n_tasks) tensors
 
 Reactions must be atom-mapped and built with `keep_h=True`, and the datasets must use `ParityCGRFeaturizer`. `tests/test_models.py` contains a complete training setup on a bundled fixture.
 
+## Alchemical transformations
+
+The input `A>>B` does not have to be a chemical reaction. Any atom-mapped pair of molecules works, including alchemical transformations in which mapped atoms change element. An odd task then predicts a relative property, such as the relative solvation free energy `ΔΔG_solv(A→B) = ΔG_solv(B) − ΔG_solv(A)`, which is exactly antisymmetric under swapping `A` and `B`.
+
+The atom map alone defines the topology of the transformation, as in alchemical free-energy methods. For phenol → toluene (hydrogens as counts):
+
+| Topology | `A>>B` | What the CGR contains |
+|---|---|---|
+| single | `[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1[OH:7]>>[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1[CH3:7]` | one node that turns from O into C in place |
+| dual | `[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1[OH]>>[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1[CH3]` | an O node that vanishes and a C node that appears |
+| hybrid | any mix, e.g. O mapped to C with explicit hydrogens partly mapped | both |
+
+A chemical reaction is the special case in which no mapped atom changes element. Nothing checks atom maps for chemical plausibility, so a map that pairs atoms of different elements by mistake is featurized as an element change.
+
+On the side where an atom is absent it is a zero dummy atom: Chemprop's atom featurizer has no null bit, and an all-zero vector (`atom_featurizer(None)`) is unambiguous, since every real atom has exactly one element bit set. A vanishing atom therefore has `d = −x_A` and an appearing atom `d = +x_B`, and the net element change summed over the graph is the same in every topology. With `ParityCGRFeaturizer(balanced=True)`, an atom absent from one side is instead copied across unchanged (Chemprop's meaning of an unrecorded spectator in an incomplete reaction).
+
 ## Things to know
 
-**Use `ParityCGRFeaturizer`, not Chemprop's CGR featurizer.** Chemprop's `CondensedGraphOfReactionFeaturizer` produces features of the same size, so a model given such data cannot tell. Its features are not in the `(s, d)` basis, though, and predictions on real reversed reactions are then only approximately odd or even. `ParityEquivariantMPNN.from_featurizer` raises `TypeError` for any other featurizer; the plain constructor cannot check this.
+**Use `ParityCGRFeaturizer`, not Chemprop's CGR featurizer.** Chemprop's `CondensedGraphOfReactionFeaturizer` is not in the `(s, d)` basis, and a model built for it gives predictions on real reversed reactions that are only approximately odd or even. `ParityEquivariantMPNN.from_featurizer` raises `TypeError` for any other featurizer; the plain constructor only sees dimensions and offsets and cannot check this.
 
 **Odd-task targets need a zero-mean scaler.** The output transform unscales as `X·scale + mean`, and the mean cancels in the odd combination, so a nonzero mean on an odd column silently biases every odd prediction by `−mean`. Fit the scaler, zero its mean on the odd columns, and only then normalize the datasets and build the transform, as in the example above. The example also resets the odd columns' scale to their root mean square `sqrt(mean(y²))`. After zeroing the mean, `scale_` is still the standard deviation about the old mean, so for data that mostly runs in one direction (`|mean| ≫ std`) the scaled odd targets would be far from unit size. Predictions are unbiased either way; the RMS scale only keeps the training targets well-conditioned. `StandardScaler(with_mean=False)` does **not** work: it still sets `mean_`, which `UnscaleTransform.from_standard_scaler` copies. The model checks this at construction and raises a `ValueError` with this recipe. Even and free tasks keep their means.
 

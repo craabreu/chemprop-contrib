@@ -27,8 +27,27 @@ rxn_smis = [
 ]
 
 
+_RING = "[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1"
+
+# Alchemical transformations: mapped atoms may change element. The atom map alone encodes the
+# topology; ordinary reactions are the element-preserving special case.
+alchemical_smis = [
+    f"{_RING}[OH:7]>>{_RING}[CH3:7]",  # phenol -> toluene, single topology (O -> C in place)
+    f"{_RING}[OH]>>{_RING}[CH3]",  # phenol -> toluene, dual topology (O vanishes, C appears)
+    # hybrid: O -> C mapped, hydroxyl H mapped to one methyl H, two methyl H appear
+    f"{_RING}[O:7][H:8]>>{_RING}[C:7]([H:8])([H])[H]",
+    "[cH:1]1[cH:2][cH:3][cH:4][cH:5][cH:6]1>>[cH:1]1[cH:2][cH:3][cH:4][cH:5][n:6]1",  # in-ring
+]
+
+
 @pytest.fixture(params=rxn_smis)
 def rxn_smi(request) -> str:
+    return request.param
+
+
+@pytest.fixture(params=rxn_smis + alchemical_smis)
+def parity_smi(request) -> str:
+    """Every input the parity guarantee must hold for: reactions and alchemical pairs."""
     return request.param
 
 

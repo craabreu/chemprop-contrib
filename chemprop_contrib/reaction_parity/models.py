@@ -60,8 +60,9 @@ class ParityEquivariantMPNN(MPNN):
 
     Notes
     -----
-    Inputs must come from :class:`ParityCGRFeaturizer`. Chemprop's own CGR featurizer has the
-    same dimensions, so the model cannot detect it; :meth:`from_featurizer` rejects it.
+    Inputs must come from :class:`ParityCGRFeaturizer`. Chemprop's own CGR featurizer is not in
+    the ``(s, d)`` basis; :meth:`from_featurizer` rejects it, but the plain constructor only
+    sees dimensions and offsets and cannot tell.
 
     Extra descriptors ``X_d`` and extra atom descriptors ``V_d`` are passed identically to both
     passes, so they must be direction-invariant.
@@ -156,14 +157,14 @@ class ParityEquivariantMPNN(MPNN):
         ------
         TypeError
             if ``featurizer`` is not a :class:`ParityCGRFeaturizer`. Chemprop's own CGR
-            featurizers have the same dimensions but not the ``(s, d)`` basis, so a model built
-            for them would silently lose exactness on real reversed reactions.
+            featurizers are not in the ``(s, d)`` basis, so a model built for them would
+            silently lose exactness on real reversed reactions.
         """
         if not isinstance(featurizer, ParityCGRFeaturizer):
             raise TypeError(
                 "from_featurizer requires a ParityCGRFeaturizer, got "
-                f"{type(featurizer).__name__}. Chemprop's CondensedGraphOfReactionFeaturizer has "
-                "the same dimensions but not the (s, d) basis that makes reversal a sign flip."
+                f"{type(featurizer).__name__}. Chemprop's CondensedGraphOfReactionFeaturizer is "
+                "not in the (s, d) basis that makes reversal a sign flip."
             )
         return cls(
             message_passing,

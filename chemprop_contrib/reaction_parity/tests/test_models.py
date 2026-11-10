@@ -109,30 +109,30 @@ def _record_logs(model, monkeypatch):
 
 
 @torch.no_grad()
-def test_odd_task_is_exactly_antisymmetric(rxn_smi):
-    feat, bmg = _featurize([rxn_smi])
+def test_odd_task_is_exactly_antisymmetric(parity_smi):
+    feat, bmg = _featurize([parity_smi])
     model = _model(feat).eval()
     f = model(bmg)[:, 0]
     torch.testing.assert_close(model(_reverse(feat, bmg))[:, 0], -f, rtol=0, atol=1e-5)
 
-    _, bmg_rev = _featurize([reverse_rxn_smi(rxn_smi)], feat)
+    _, bmg_rev = _featurize([reverse_rxn_smi(parity_smi)], feat)
     torch.testing.assert_close(model(bmg_rev)[:, 0], -f, rtol=0, atol=1e-5)
 
 
 @torch.no_grad()
-def test_even_task_is_exactly_symmetric(rxn_smi):
-    feat, bmg = _featurize([rxn_smi])
+def test_even_task_is_exactly_symmetric(parity_smi):
+    feat, bmg = _featurize([parity_smi])
     model = _model(feat).eval()
     f = model(bmg)[:, 1]
     torch.testing.assert_close(model(_reverse(feat, bmg))[:, 1], f, rtol=0, atol=1e-5)
 
-    _, bmg_rev = _featurize([reverse_rxn_smi(rxn_smi)], feat)
+    _, bmg_rev = _featurize([reverse_rxn_smi(parity_smi)], feat)
     torch.testing.assert_close(model(bmg_rev)[:, 1], f, rtol=0, atol=1e-5)
 
 
 @torch.no_grad()
-def test_free_task_equals_forward_pass(rxn_smi):
-    feat, bmg = _featurize([rxn_smi])
+def test_free_task_equals_forward_pass(parity_smi):
+    feat, bmg = _featurize([parity_smi])
     model = _model(feat).eval()
     expected = model.predictor(model.fingerprint(bmg))[:, 2]
     torch.testing.assert_close(model(bmg)[:, 2], expected, rtol=0, atol=1e-5)
