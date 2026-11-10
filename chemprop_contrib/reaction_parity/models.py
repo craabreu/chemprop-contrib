@@ -55,6 +55,9 @@ class ParityEquivariantMPNN(MPNN):
 
     Notes
     -----
+    Extra descriptors ``X_d`` are appended identically to both passes, so they must be
+    direction-invariant.
+
     :meth:`fingerprint` returns the forward-direction fingerprint only, so its shape is
     unchanged but it is direction-dependent; the parity structure lives in the combination of
     predictor outputs.
@@ -73,8 +76,19 @@ class ParityEquivariantMPNN(MPNN):
     ):
         # normalised before MPNN.__init__ so that the hyperparameters it collects from this
         # frame hold plain ints
-        odd_atom_start = int(odd_atom_start)
-        odd_bond_start = int(odd_bond_start)
+        odd_atom_start = self._as_start_index("odd_atom_start", odd_atom_start)
+        odd_bond_start = self._as_start_index("odd_bond_start", odd_bond_start)
+        d_v, d_e = message_passing.hparams["d_v"], message_passing.hparams["d_e"]
+        if not 0 < odd_atom_start < d_v:
+            raise ValueError(
+                f"odd_atom_start must satisfy 0 < odd_atom_start < d_v = {d_v}, "
+                f"got {odd_atom_start}"
+            )
+        if not 0 < odd_bond_start < d_e:
+            raise ValueError(
+                f"odd_bond_start must satisfy 0 < odd_bond_start < d_e = {d_e}, "
+                f"got {odd_bond_start}"
+            )
         task_parity = [int(p) for p in task_parity]
 
         if not isinstance(message_passing.graph_transform, nn.Identity):
@@ -93,6 +107,12 @@ class ParityEquivariantMPNN(MPNN):
         self.odd_bond_start = odd_bond_start
         self.task_parity = task_parity
         self.register_buffer("parity_mask", mask, persistent=False)
+
+    @staticmethod
+    def _as_start_index(name: str, value) -> int:
+        if isinstance(value, bool) or int(value) != value:
+            raise ValueError(f"{name} must be an integer, got {value!r}")
+        return int(value)
 
     @staticmethod
     def _check_odd_task_mean(predictor: Predictor, task_parity: list[int]) -> None:

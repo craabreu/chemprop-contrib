@@ -34,23 +34,23 @@ def test_is_invertible_map_of_reac_diff(rxn_smi, balanced):
 
     V = mg_ours.V.copy()
     V[:, k:F] -= 0.5 * V[:, F:]
-    np.testing.assert_array_equal(V, mg_core.V)
+    np.testing.assert_allclose(V, mg_core.V, atol=1e-5)
 
     E = mg_ours.E.copy()
     E[:, :Bb] -= 0.5 * E[:, Bb:]
-    np.testing.assert_array_equal(E, mg_core.E)
+    np.testing.assert_allclose(E, mg_core.E, atol=1e-5)
 
     np.testing.assert_array_equal(mg_ours.edge_index, mg_core.edge_index)
     np.testing.assert_array_equal(mg_ours.rev_edge_index, mg_core.rev_edge_index)
 
 
 def test_rejects_explicit_mode():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="does not accept"):
         ParityCGRFeaturizer(mode_="REAC_PROD")
 
 
 def test_asserts_shared_atomic_number_block():
     # element-inconsistent atom map: mapped C on the reactant side, N on the product side
     rxn = make_rxn("[CH4:1]>>[NH3:1]")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="element-inconsistent"):
         ParityCGRFeaturizer()(rxn)

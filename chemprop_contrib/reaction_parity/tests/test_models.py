@@ -305,6 +305,37 @@ def test_rejects_disallowed_predictor():
         _model(predictor=predictor)
 
 
+@pytest.mark.parametrize("start", [0, -1, "atom_fdim"])
+def test_rejects_out_of_range_atom_start(start):
+    feat = ParityCGRFeaturizer()
+    start = feat.atom_fdim if start == "atom_fdim" else start
+    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    with pytest.raises(ValueError, match="odd_atom_start must satisfy"):
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, start, feat.odd_bond_start, PARITY)
+
+
+@pytest.mark.parametrize("start", [0, -1, "bond_fdim"])
+def test_rejects_out_of_range_bond_start(start):
+    feat = ParityCGRFeaturizer()
+    start = feat.bond_fdim if start == "bond_fdim" else start
+    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    with pytest.raises(ValueError, match="odd_bond_start must satisfy"):
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, start, PARITY)
+
+
+@pytest.mark.parametrize("bad", [10.5, True])
+def test_rejects_non_integral_start(bad):
+    feat = ParityCGRFeaturizer()
+    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    with pytest.raises(ValueError, match="odd_atom_start must be an integer"):
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, bad, feat.odd_bond_start, PARITY)
+    with pytest.raises(ValueError, match="odd_bond_start must be an integer"):
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, bad, PARITY)
+
+
 def test_rejects_wrong_task_parity_length():
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="n_tasks"):
@@ -414,9 +445,9 @@ def test_output_shape_matches_plain_mpnn(cls):
 # R5 / R6: uncertainty predictors
 
 
-def _odd_even_outputs(cls, rxns=None):
+def _odd_even_outputs(cls):
     """Eval-mode outputs ``(f, f_rev)``, each ``(B, 2, n_targets)``, for tasks ``[ODD, EVEN]``."""
-    feat, bmg = _featurize(rxns or [*rxn_smis, CHAIN_SMI])
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     predictor = cls(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
     model = _model(feat, predictor=predictor, task_parity=[ODD, EVEN]).eval()
     with torch.no_grad():

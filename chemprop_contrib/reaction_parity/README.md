@@ -41,7 +41,8 @@ from chemprop_contrib.reaction_parity import (
 # columns: dH (odd), reorganization energy (even), Ea (free)
 task_parity = [ODD, EVEN, FREE]
 cols = ["dH", "lambda", "Ea"]
-rows = list(csv.DictReader(open("reactions.csv")))  # atom-mapped reaction SMILES in "smiles"
+with open("reactions.csv") as f:  # atom-mapped reaction SMILES in "smiles"
+    rows = list(csv.DictReader(f))
 
 featurizer = ParityCGRFeaturizer()
 dps = [
@@ -86,7 +87,11 @@ Reactions must be atom-mapped and built with `keep_h=True`. `tests/test_models.p
 
 **Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks across the two passes make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you.
 
+**Extra descriptors must be direction-invariant.** `X_d` is appended identically to the forward and reversed passes, so it is treated as invariant under reversal. Reaction conditions such as temperature or solvent are fine. Direction-dependent descriptors (for example reactant-side-only descriptors) break exactness unless you symmetrise them or fold them into the graph.
+
 **`fingerprint` is direction-dependent.** `model.fingerprint(...)` returns the forward-direction fingerprint only, with the usual shape. The parity structure lives in the combination of predictor outputs, not in the fingerprint.
+
+**Loading saved models.** Use `ParityEquivariantMPNN.load_from_file` or `ParityEquivariantMPNN.load_from_checkpoint`. Chemprop's generic `MPNN.load_from_file`, `chemprop.models.utils.load_model` and the `chemprop predict` CLI cannot rebuild this class (they raise a `TypeError` about `odd_atom_start`).
 
 ## Unsupported combinations
 
