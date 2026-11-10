@@ -1,7 +1,8 @@
 # Spec: Parity-Equivariant Reaction Property Prediction
 
 **Package:** `chemprop_contrib/reaction_parity`
-**Date:** 2026-11-09 (revised 2026-11-10 after independent review)
+**Date:** 2026-11-09 (revised 2026-11-10 after independent review, and to admit alchemical
+transformations, §5.1)
 **Target:** `chemprop/chemprop-contrib`, against chemprop `v2.3.1` (verified at `1b90e3e2`)
 
 ---
@@ -71,7 +72,16 @@ reactant-side and product-side feature vectors of an atom or bond, and `d = x_p 
 | **this spec** | `(s, d)` with `s = ½(x_r + x_p)` | `(s, −d)` — **sign flip** |
 
 In the `(s, d)` basis, reversal is a sign flip on a known, contiguous column block. The basis change
-is invertible, so no information is lost relative to `REAC_DIFF`.
+is invertible, and the element block gets an `s` and a `d` part like every other feature, so no
+information is lost relative to `REAC_DIFF` and more is kept: an element change in the atom map is
+representable (§5.1).
+
+**3.3 Alchemical transformations.** Nothing in §3.1 requires `A>>B` to be a chemical reaction. Any
+atom-mapped pair of molecules works, including alchemical transformations such as phenol → toluene,
+whose relative properties (e.g. relative solvation free energy) are odd under swapping `A` and `B`.
+The atom map alone defines the topology, as in alchemical free-energy methods: a mapped atom that
+changes element is single topology, unmapped atoms on each side are dual topology, and a mix is
+hybrid. A chemical reaction is the special case in which no mapped atom changes element.
 
 **3.2 Reversal leaves the topology untouched.** Reversing permutes node order but produces the same
 graph. Because message passing is permutation-equivariant and aggregation permutation-invariant, the
@@ -150,20 +160,30 @@ cannot express this constraint at all. Out of scope for v1; see §8.
 Subclasses `chemprop.featurizers.molgraph.reaction.CondensedGraphOfReactionFeaturizer`. **No core
 changes are required.**
 
-It does **not** reimplement the parent's feature construction. It calls
-`super()._calc_node_feature_matrix(...)` and `super()._calc_edge_feature(...)`, which yield the
-`REAC_DIFF` layout `(x_r, d)`, and applies the basis change in place:
+**Node features are built by the featurizer itself.** Core `REAC_DIFF` writes the atomic-number
+block once, from whichever side is present (`featurizers/molgraph/reaction.py:208-213`), because it
+assumes a mapped atom keeps its element; its output therefore cannot represent an element change.
+`_calc_node_feature_matrix` computes `x_r` and `x_p` per CGR node with `atom_featurizer`, in core's
+node order (reactant atoms, then product-only atoms), and emits `(s, d)`.
 
-```
-s = x_r + d/2        →  emit (s, d)
-```
+An atom absent from one side is a **zero dummy atom** there, `atom_featurizer(None)`. Core's atom
+featurizer has no null bit (`featurizers/atom.py:89-93`), and none is needed: every real atom has
+exactly one element bit set, the "other" slot catching uncommon elements, so an all-zero vector is
+unambiguous. A vanishing atom has `d = −x_r`, an appearing atom `d = +x_p`, and the net element
+change summed over the graph is the same in every topology. (Core's `num_only` convention, which
+keeps the element bit on the absent side, was correct only while the element was written once.)
+With `balanced=True` an absent atom is instead copied across unchanged (`d = 0`), core's
+`*_BALANCE` meaning of an unrecorded spectator.
 
-This is why: the parent's balanced and unbalanced branches differ
-(`featurizers/molgraph/reaction.py:182-202`), so reimplementing either one silently breaks the
-other. Delegating makes R1 true by construction and leaves no duplicated core logic to drift.
-Verified working for both `balanced` settings during review.
+**Edge features delegate to core.** `_calc_edge_feature` calls `super()._calc_edge_feature(...)`,
+which yields `(x_e_r, d_e)`, and applies `s = x_e_r + d_e/2` in place. Bonds carry no element
+information, so delegation loses nothing.
 
-A `balanced: bool = False` field selects the `_get_bonds` behaviour; `__post_init__` **passes** the
+There is no element-consistency check: an element change is data, not an error. (An earlier
+revision rejected element-inconsistent maps; that check went when alchemical transformations were
+admitted.)
+
+A `balanced: bool = False` field selects the `_get_bonds` behaviour and the absent-atom convention above; `__post_init__` **passes** the
 corresponding mode to the parent (`super().__post_init__(RxnMode.REAC_DIFF_BALANCE if self.balanced
 else RxnMode.REAC_DIFF)`) rather than assigning `self.mode` first, because the parent's
 `__post_init__` assigns `self.mode = mode_` at `reaction.py:76` and would overwrite it. A
@@ -173,18 +193,14 @@ balance behaviour is configurable.
 With `F = len(atom_featurizer)`, `k = len(atom_featurizer.atomic_nums) + 1`,
 `Bb = len(bond_featurizer)`:
 
-**Node layout** (`atom_fdim = 2F − k`, unchanged from core):
+**Node layout** (`atom_fdim = 2F`, `k` columns wider than core's `2F − k`):
 
 | Columns | Content | Parity |
 |---|---|---|
-| `[0:k]` | atomic-number block, emitted once | shared |
-| `[k:F]` | `½(x_r + x_p)[k:]` | even |
-| `[F:2F−k]` | `(x_p − x_r)[k:]` | **odd** |
+| `[0:F]` | `½(x_r + x_p)` | even |
+| `[F:2F]` | `x_p − x_r` | **odd** |
 
-Emitting the atomic-number block once is valid because `num_only` (`featurizers/atom.py:113-123`)
-sets only the atomic-number bit. For *unmapped* atoms this holds by construction; for *mapped*
-atoms it holds provided the atom map is element-consistent, which RDKit does not enforce. The
-featurizer asserts `x_r[:k] == x_p[:k]` rather than assuming it.
+For element-preserving reactions the `k` element columns of the odd block are zero on mapped atoms.
 
 **Edge layout** (`bond_fdim = 2Bb`, unchanged from core):
 
@@ -307,8 +323,8 @@ applied **after** `predictor` (which includes `output_transform`), per §4.1.
 
 | ID | Requirement |
 |---|---|
-| R1 | `ParityCGRFeaturizer` output is an invertible linear map of the corresponding `REAC_DIFF` output. True by construction given the delegation in §5.1; tested anyway. |
-| R2 | For every mode and reaction class, `encoder(reverse_bmg(featurize(rxn)))` equals `encoder(featurize(reverse(rxn)))` at the **aggregated fingerprint** level. Compared post-aggregation because node ordering legitimately differs. |
+| R1 | On element-preserving reactions, `ParityCGRFeaturizer` output agrees with the corresponding `REAC_DIFF` output: non-element columns are the `(s, d)` basis change of core's, and core's element block equals `max(x_r, x_p) = s + |d|/2`. On alchemical inputs, single-topology nodes have `s = ½(x_A + x_B)`, `d = x_B − x_A`, and dual-topology absent sides are zero (copied across with `balanced=True`). |
+| R2 | For every mode and reaction class, including single-, dual- and hybrid-topology alchemical pairs, `encoder(reverse_bmg(featurize(rxn)))` equals `encoder(featurize(reverse(rxn)))` at the **aggregated fingerprint** level. Compared post-aggregation because node ordering legitimately differs. |
 | R3 | In `eval()`, odd-task outputs satisfy `f(x̄) = −f(x)` to `atol=1e-5`. |
 | R4 | In `eval()`, even-task outputs satisfy `f(x̄) = +f(x)`; free-task outputs equal the forward pass exactly. |
 | R5 | `MveFFN` variance and `EvidentialFFN` `v, α, β` remain strictly positive for odd tasks. |
@@ -342,8 +358,8 @@ so a train-mode assertion can pass for unrelated reasons.
   regime where the Brehmer-style architectural tax argument does apply. (Both this and the shipped
   design are parity-equivariant; they differ in *where* the equivariance lives.)
 - **cuik-molmaker support.** `CuikmolmakerCGRFeaturizer` passes a mode integer to a C++ library and
-  cannot express a new layout. Since `(s,d)` is a linear map of `REAC_DIFF`, support could be added
-  by applying the basis change to cuik output on the GPU.
+  cannot express a new layout, and its output, like core's, writes the element block once, so it
+  cannot represent element changes.
 - **Cycle consistency beyond 2-cycles.** `f(A→B) + f(B→C) + f(C→A) = 0` requires a state-function
   form `f = h(B) − h(A)`, which discards CGR's cross-side bond correspondence.
 - **CLI integration.** Model construction is via the Python API.
@@ -369,15 +385,17 @@ run (`--steps 1000`) on whichever arm is kept.
 
 ## 10. Known risks
 
-1. **Unbalanced reactions.** `num_only` zero-padding reaches reactant-only and product-only atoms
+1. **Unbalanced reactions.** Absent-side padding reaches reactant-only and product-only atoms
    through different code paths. R2 must cover reactant-heavy and product-heavy cases explicitly.
 2. **Silently incomplete training path.** The parity combination must be present in three places,
    not one (§5.4). R8 is the guard, and it belongs in the task that writes the model, not only in a
    late smoke test.
 3. **Odd-task target means.** A standard `StandardScaler` silently biases every odd prediction
    (§4.1). R7 is the guard.
-4. **Feature scaling.** Enabling atom/bond feature scaling silently breaks equivariance. R7 is the
-   guard.
+4. **Feature scaling.** Not a risk after all: the graph transform runs after `reverse_bmg`, inside
+   the encoder (§4.2).
+5. **Mis-mapped atoms.** With no element-consistency check, a map that pairs atoms of different
+   elements by mistake is featurized as an alchemical change rather than rejected.
 5. **Empty edge arrays.** Reactions with no bonds produce `np.empty((0, bond_fdim))`; `reverse_bmg`
    must handle a zero-row `E`.
 
