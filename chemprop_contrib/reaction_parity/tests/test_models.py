@@ -1,3 +1,7 @@
+import csv
+from pathlib import Path
+
+from chemprop.data import ReactionDataset, ReactionDatapoint, build_dataloader
 from chemprop.data.collate import BatchMolGraph
 from chemprop.models import MPNN
 from chemprop.nn import BondMessagePassing, MeanAggregation
@@ -9,6 +13,7 @@ from chemprop.nn.predictors import (
     RegressionFFN,
 )
 from chemprop.nn.transforms import GraphTransform, ScaleTransform, UnscaleTransform
+import lightning.pytorch as pl
 import numpy as np
 import pytest
 from sklearn.preprocessing import StandardScaler
@@ -18,6 +23,7 @@ from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, re
 from chemprop_contrib.reaction_parity.models import ParityEquivariantMPNN
 from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
 
+from . import make_test_data
 from .conftest import make_rxn, reverse_rxn_smi, rxn_smis
 
 D_H = 16
@@ -462,3 +468,182 @@ def test_mve_loss_is_finite_for_odd_task(monkeypatch):
     assert loss.ndim == 0 and torch.isfinite(loss)
     loss.backward()
     assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
+# ---------------------------------------------------------------------------------------------
+# R8 / R9: fixture data, training, checkpoint round-trip
+
+FIXTURE_CSV = Path(__file__).with_name("test_data.csv")
+FIXTURE_PARITY = [FREE, ODD, EVEN]  # CSV column order: ea, y_odd, y_even
+FIXTURE_COLS = ["ea", "y_odd", "y_even"]
+N_TRAIN, N_VAL = 24, 8
+
+
+def _fixture_rows():
+    with open(FIXTURE_CSV, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_fixture_targets_have_the_parity_they_claim():
+    rows = _fixture_rows()
+    assert len(rows) == 100
+    assert any(abs(float(r["y_odd"])) > 1e-3 for r in rows), "y_odd must not be vacuous"
+    for r in rows[:10]:
+        odd, even = make_test_data.derived_targets(reverse_rxn_smi(r["smiles"]))
+        assert odd == pytest.approx(-float(r["y_odd"]), abs=1e-9)
+        assert even == pytest.approx(float(r["y_even"]), abs=1e-9)
+
+
+def _datasets(feat, n_train=N_TRAIN, n_val=N_VAL):
+    rows = _fixture_rows()[: n_train + n_val]
+    dps = [
+        ReactionDatapoint.from_smi(
+            r["smiles"], y=[float(r[c]) for c in FIXTURE_COLS], keep_h=True, add_h=False
+        )
+        for r in rows
+    ]
+    train = ReactionDataset(dps[:n_train], featurizer=feat)
+    val = ReactionDataset(dps[n_train:], featurizer=feat)
+    # supported scaler recipe: zero the odd columns' mean so it cancels nowhere
+    scaler = StandardScaler().fit(train.Y)
+    scaler.mean_[[i for i, p in enumerate(FIXTURE_PARITY) if p == ODD]] = 0.0
+    train.normalize_targets(scaler)
+    val.normalize_targets(scaler)
+    return train, val, UnscaleTransform.from_standard_scaler(scaler)
+
+
+def _fixture_model(feat, output_transform):
+    torch.manual_seed(0)
+    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=32)
+    predictor = RegressionFFN(
+        n_tasks=3, input_dim=mp.output_dim, hidden_dim=32, output_transform=output_transform
+    )
+    return ParityEquivariantMPNN.from_featurizer(
+        feat, mp, MeanAggregation(), predictor, FIXTURE_PARITY, batch_norm=True
+    )
+
+
+# Two third-party warnings `trainer.fit` cannot avoid here: Lightning's CombinedLoader calls a
+# torch pytree API that torch has deprecated, and the num_workers=0 dataloaders (required for
+# a deterministic, fast test) trigger Lightning's "not many workers" advice
+lightning_warnings = pytest.mark.filterwarnings(
+    "ignore:`isinstance\\(treespec, LeafSpec\\)` is deprecated:FutureWarning",
+    "ignore:The '.*dataloader' does not have many workers",
+)
+
+
+def _trainer(max_epochs, **kwargs):
+    return pl.Trainer(
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=kwargs.pop("enable_checkpointing", False),
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        max_epochs=max_epochs,
+        **kwargs,
+    )
+
+
+@torch.no_grad()
+def _eval_loss(model, loader):
+    """Criterion on eval-mode combined predictions, in the scaled target space."""
+    was_training = model.training
+    model.eval()
+    # in eval() the output transform unscales, so map back to the space of the scaled targets
+    tf = model.predictor.output_transform
+    total, n = 0.0, 0
+    for bmg, _, _, targets, weights, lt, gt in loader:
+        preds = (model(bmg) - tf.mean) / tf.scale
+        total += float(model.criterion(preds, targets, targets.isfinite(), weights, lt, gt)) * len(
+            bmg
+        )
+        n += len(bmg)
+    model.train(was_training)
+    return total / n
+
+
+def _fit(max_epochs=100, **trainer_kwargs):
+    pl.seed_everything(0)
+    feat = ParityCGRFeaturizer()
+    train, val, transform = _datasets(feat)
+    model = _fixture_model(feat, transform)
+    train_loader = build_dataloader(train, batch_size=8, num_workers=0, seed=0)
+    val_loader = build_dataloader(val, batch_size=8, num_workers=0, shuffle=False)
+    eval_loader = build_dataloader(train, batch_size=N_TRAIN, num_workers=0, shuffle=False)
+    before = _eval_loss(model, eval_loader)
+    trainer = _trainer(max_epochs, **trainer_kwargs)
+    trainer.fit(model, train_loader, val_loader)
+    return feat, model, trainer, before, _eval_loss(model, eval_loader), val
+
+
+def test_gradients_reach_all_encoder_parameters(monkeypatch):
+    feat = ParityCGRFeaturizer()
+    train, _, transform = _datasets(feat)
+    model = _fixture_model(feat, transform)
+    _record_logs(model, monkeypatch)
+    batch = next(iter(build_dataloader(train, batch_size=N_TRAIN, num_workers=0, shuffle=False)))
+    model.train().zero_grad()
+    model.training_step(batch, 0).backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None and p.grad.abs().sum() > 0, name
+
+
+@lightning_warnings
+def test_training_reduces_loss_on_an_exactly_odd_target():
+    # meaningful because y_odd genuinely has odd parity: a constrained model can fit a
+    # function of the parity it exists for
+    _, _, _, before, after, _ = _fit()
+    assert after < 0.1 * before, (before, after)
+
+
+@lightning_warnings
+@torch.no_grad()
+def test_antisymmetry_survives_training():
+    feat, model, _, _, _, val = _fit(max_epochs=10)
+    model.eval()
+    bmg = BatchMolGraph([val[i].mg for i in range(len(val))])
+    f = model(bmg)
+    f_rev = model(_reverse(feat, bmg))
+    torch.testing.assert_close(f_rev[:, 1], -f[:, 1], rtol=0, atol=1e-5)
+    torch.testing.assert_close(f_rev[:, 2], f[:, 2], rtol=0, atol=1e-5)
+    assert not torch.allclose(f_rev[:, 0], f[:, 0], atol=1e-5)  # free task stays free
+    assert f[:, 1].abs().max() > 1e-3  # not vacuous
+
+    # and through the real reversed SMILES, featurized from scratch
+    rows = _fixture_rows()[N_TRAIN : N_TRAIN + 3]
+    _, bmg_rev = _featurize([reverse_rxn_smi(r["smiles"]) for r in rows], feat)
+    _, bmg_fwd = _featurize([r["smiles"] for r in rows], feat)
+    torch.testing.assert_close(model(bmg_rev)[:, 1], -model(bmg_fwd)[:, 1], rtol=0, atol=1e-5)
+
+
+@torch.no_grad()
+@lightning_warnings
+def test_checkpoint_round_trip_preserves_parity(tmp_path):
+    feat, model, trainer, _, _, val = _fit(max_epochs=3)
+    path = tmp_path / "parity.ckpt"
+    trainer.save_checkpoint(path)
+
+    loaded = ParityEquivariantMPNN.load_from_checkpoint(path)
+    for hp in (loaded.hparams, model.hparams):
+        assert hp["odd_atom_start"] == feat.odd_atom_start
+        assert hp["odd_bond_start"] == feat.odd_bond_start
+        assert hp["task_parity"] == FIXTURE_PARITY
+    assert loaded.odd_atom_start == feat.odd_atom_start
+    assert loaded.odd_bond_start == feat.odd_bond_start
+    assert loaded.task_parity == FIXTURE_PARITY
+    assert torch.equal(loaded.parity_mask, model.parity_mask)
+
+    model.eval()
+    loaded.eval()
+    bmg = BatchMolGraph([val[i].mg for i in range(len(val))])
+    f = loaded(bmg)
+    torch.testing.assert_close(f, model(bmg), rtol=0, atol=1e-5)
+    f_rev = loaded(_reverse(feat, bmg))
+    torch.testing.assert_close(f_rev[:, 1], -f[:, 1], rtol=0, atol=1e-5)
+    torch.testing.assert_close(f_rev[:, 2], f[:, 2], rtol=0, atol=1e-5)
+
+    # chemprop's own loader rebuilds the model from the same checkpoint
+    from_file = ParityEquivariantMPNN.load_from_file(path).eval()
+    assert from_file.task_parity == FIXTURE_PARITY
+    assert torch.equal(from_file.parity_mask, model.parity_mask)
+    torch.testing.assert_close(from_file(bmg), model(bmg), rtol=0, atol=1e-5)
