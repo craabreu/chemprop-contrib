@@ -15,3 +15,6 @@ keep_h=True, add_h=False), rounded to 4 decimals:
 
 Regenerate with:
     python chemprop_contrib/reaction_parity/tests/make_test_data.py <path-to-rxn.csv>
+
+The repository's .gitignore ignores *.csv, so a regenerated test_data.csv must be staged with
+'git add -f'.
