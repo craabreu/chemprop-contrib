@@ -34,7 +34,7 @@
 1. **Unbalanced reactions** — reactant-only and product-only atoms reach `num_only` through different code paths, so symmetry must be checked on reactant-heavy and product-heavy cases, not only balanced ones. Covered in Tasks 1 and 3.
 2. **Odd-task target means** — a stock `StandardScaler` leaves `mean ≠ 0`, which cancels in the odd combination and biases every odd prediction by `−μ` with no error anywhere. Covered in Task 5.
 3. **Zero-edge reactions** — `"[CH4:1]>>[CH3:1].[H:2]"` yields `E` of shape `(0, bond_fdim)`; `reverse_bmg` must return a correctly-shaped empty tensor rather than raising or broadcasting. Covered in Task 3.
-4. **Enabled atom/bond feature scaling** — a non-identity `graph_transform` subtracts a mean *before* the encoder, which does not cancel and silently destroys equivariance. Covered in Task 5.
+4. **Enabled atom/bond feature scaling** — a non-identity `graph_transform` subtracts a mean *before* the encoder, which does not cancel and silently destroys equivariance. Covered in Task 5. *(Corrected after review: the transform runs after `reverse_bmg`, inside `g`, so it is harmless; the check was removed. See spec §4.2.)*
 5. **Checkpoint round-trip** — if `task_parity`, `odd_atom_start` and `odd_bond_start` do not survive, a reloaded model either fails to load or silently loses its constraint. Covered in Task 7.
 
 ---
@@ -302,7 +302,7 @@ def test_rejects_nonzero_odd_task_target_mean(): ...
     # Review Focus 2: UnscaleTransform with mean != 0 on an odd column -> ValueError
 def test_zero_mean_odd_task_is_unbiased(): ...
     # scaler with mean_[odd_cols] = 0.0 (not with_mean=False): eval prediction has no -mu offset
-def test_rejects_non_identity_graph_transform(): ...        # Review Focus 4
+def test_rejects_non_identity_graph_transform(): ...        # Review Focus 4 (later replaced: scaling is harmless, spec §4.2)
 def test_extra_descriptors_reach_both_passes(): ...
 def test_v_d_is_forwarded_to_both_passes(): ...
 def test_antisymmetry_holds_with_batch_norm(rxn_smi): ...
@@ -317,7 +317,7 @@ Expected: FAIL with `ImportError`.
 
 - [ ] **Step 3: Implement `ParityEquivariantMPNN`**
 
-`__init__` validates per R7 — `graph_transform` is `nn.Identity`, predictor is in the allowlist, and `output_transform.mean` is zero on odd-task columns — then registers the mask as a **non-persistent** buffer (`register_buffer(..., persistent=False)`) so it does not duplicate the `task_parity` hyperparameter in `state_dict`.
+`__init__` validates per R7 — `graph_transform` is `nn.Identity` (later dropped, spec §4.2), predictor is in the allowlist, and `output_transform.mean` is zero on odd-task columns — then registers the mask as a **non-persistent** buffer (`register_buffer(..., persistent=False)`) so it does not duplicate the `task_parity` hyperparameter in `state_dict`.
 
 Four methods, per spec §5.4:
 
@@ -470,7 +470,7 @@ Expected: PASS, with no other package's tests broken.
 
 - [ ] **Step 5: Write `reaction_parity/README.md`**
 
-Covers: the physical motivation, leading with antisymmetry since that is what readers will search for; the parity table with example targets (ΔH odd, reorganization energy even, `Ea` free); a minimal end-to-end example via `from_featurizer`; **the zero-mean-scaler requirement for odd-task targets** (fit `StandardScaler`, set `scaler.mean_[odd_cols] = 0.0`, then normalize and build the transform; `with_mean=False` does not work), which is a silent bias if missed; the **eval-only** exactness caveat; that `fingerprint` returns the direction-dependent forward half; unsupported combinations (predictors outside the allowlist, non-identity `graph_transform`, cuik-molmaker); and the deferred coupled ΔH/Ea recipe `Ea_fwd = B + ΔH/2`, `Ea_rev = B − ΔH/2` as future work.
+Covers: the physical motivation, leading with antisymmetry since that is what readers will search for; the parity table with example targets (ΔH odd, reorganization energy even, `Ea` free); a minimal end-to-end example via `from_featurizer`; **the zero-mean-scaler requirement for odd-task targets** (fit `StandardScaler`, set `scaler.mean_[odd_cols] = 0.0`, then normalize and build the transform; `with_mean=False` does not work), which is a silent bias if missed; the **eval-only** exactness caveat; that `fingerprint` returns the direction-dependent forward half; unsupported combinations (predictors outside the allowlist, non-identity `graph_transform` (later dropped, spec §4.2), cuik-molmaker); and the deferred coupled ΔH/Ea recipe `Ea_fwd = B + ΔH/2`, `Ea_rev = B − ΔH/2` as future work.
 
 - [ ] **Step 6: Commit**
 

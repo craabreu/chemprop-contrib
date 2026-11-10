@@ -116,7 +116,9 @@ The mean cancels, so **every odd-task prediction is biased by −μ**. Confirmed
 review.
 
 **Requirement:** odd-task columns of the target scaler must have `mean == 0` — fit with
-`StandardScaler` and then set `scaler.mean_[odd_cols] = 0.0`, call `normalize_targets(scaler)` on
+`StandardScaler` and then set `scaler.mean_[odd_cols] = 0.0` (and, recommended, reset
+`scaler.scale_[odd_cols]` to the root mean square `sqrt(mean(y²))`, since the fitted `scale_` is the
+standard deviation about the discarded mean), call `normalize_targets(scaler)` on
 each dataset, and build the transform with `UnscaleTransform.from_standard_scaler(scaler)`.
 `StandardScaler(with_mean=False)` does not work: sklearn still sets `mean_`, and
 `from_standard_scaler` copies it. The model validates this at construction (R7). Even and free tasks are unaffected and keep their means.
@@ -124,12 +126,15 @@ each dataset, and build the transform with `UnscaleTransform.from_standard_scale
 `on_validation_model_eval` (`models/model.py:163-168`) explicitly puts `output_transform` back into
 train mode, so validation loss is computed in scaled space, consistently with training.
 
-### 4.2 The graph scaler must be identity
+### 4.2 The graph scaler is harmless
 
-`GraphTransform` applies `(X − mean)/scale` to `V` and `E` *before* the nonlinear encoder, so a
-nonzero mean on an odd column breaks equivariance and does not cancel. It defaults to
-`nn.Identity()` (`nn/message_passing/base.py:88`) and is only active with atom/bond feature scaling
-enabled. The model rejects a non-identity `graph_transform` (R7).
+`GraphTransform` applies `(X − mean)/scale` to `V` and `E` at the start of
+`MessagePassing.forward` (`nn/message_passing/base.py:197`). The model calls `reverse_bmg` on the
+*raw* features and then runs the message passing on both graphs, so the transform is applied after
+the reversal and is simply part of `g`; the Reynolds average is exact for any `g`. A nonzero mean
+on an odd column therefore does not break equivariance. (An earlier draft of this section claimed
+it did and required `nn.Identity()`; independent review and a numerical check showed the
+combination stays exact, and the check was removed.)
 
 ### 4.3 Coupled barrier heads (motivating case, deferred to v2)
 
@@ -271,8 +276,8 @@ The method split:
 | `forward` | `(B, …)` | `_combine(predictor(_paired_fingerprint(...)))` |
 | `training_step`, `validation_step` | — | override to use `_paired_fingerprint` + `predictor.train_step` + `_combine`, mirroring the parent's masking and weighting |
 
-Keeping `fingerprint` at `(B, d')` means `encoding` (`model.py:136-140`) and the `chemprop
-fingerprint` CLI continue to work unchanged, and only three methods are overridden. The returned
+Keeping `fingerprint` at `(B, d')` means `encoding` (`model.py:136-140`) works unchanged (the
+`chemprop fingerprint` CLI does not: its loader cannot rebuild this class; see the package README), and only three methods are overridden. The returned
 fingerprint is direction-dependent; the parity structure lives in the combination, and the README
 says so.
 
@@ -308,7 +313,7 @@ applied **after** `predictor` (which includes `output_transform`), per §4.1.
 | R4 | In `eval()`, even-task outputs satisfy `f(x̄) = +f(x)`; free-task outputs equal the forward pass exactly. |
 | R5 | `MveFFN` variance and `EvidentialFFN` `v, α, β` remain strictly positive for odd tasks. |
 | R6 | `QuantileFFN`'s interval component is combined as `EVEN`, so a nonnegative interval stays nonnegative. Core does not guarantee `interval ≥ 0` for an untrained model, so this is stated as parity preservation, not as an ordering assertion on random weights. |
-| R7 | Construction raises if: `graph_transform` is not `nn.Identity`; the predictor is outside the §5.3 allowlist; or `output_transform.mean` is nonzero on any odd-task column. |
+| R7 | Construction raises if: a `task_parity` entry is not `ODD`, `EVEN` or `FREE` (floats and booleans rejected, not truncated); the predictor is outside the §5.3 allowlist; or `output_transform.mean` is nonzero on any odd-task column. `from_featurizer` raises `TypeError` for a featurizer other than `ParityCGRFeaturizer`. Atom/bond feature scaling is allowed (§4.2). |
 | R8 | The parity combination is present in `training_step` and `validation_step`, not only `forward`. Gradients reach all encoder parameters; a training smoke test reduces loss and preserves R3 afterwards. |
 | R9 | `odd_atom_start`, `odd_bond_start` and `task_parity` survive a checkpoint round-trip, and a reloaded model reproduces predictions and R3 exactly. |
 
