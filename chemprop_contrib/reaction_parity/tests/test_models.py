@@ -9,7 +9,9 @@ from chemprop.nn.predictors import (
     RegressionFFN,
 )
 from chemprop.nn.transforms import GraphTransform, ScaleTransform, UnscaleTransform
+import numpy as np
 import pytest
+from sklearn.preprocessing import StandardScaler
 import torch
 
 from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
@@ -73,6 +75,19 @@ def _batch(bmg, n_tasks=3, V_d=None, X_d=None, targets=None):
         torch.zeros(B, n_tasks, dtype=torch.bool),
         torch.zeros(B, n_tasks, dtype=torch.bool),
     )
+
+
+class _MetricSpy(torch.nn.Module):
+    """Module wrapper so it can replace an entry of ``model.metrics`` (a ``ModuleList``)."""
+
+    def __init__(self, metric):
+        super().__init__()
+        self.metric = metric
+        self.preds = []
+
+    def forward(self, preds, *args):
+        self.preds.append(preds)
+        return self.metric(preds, *args)
 
 
 def _record_logs(model, monkeypatch):
@@ -176,19 +191,6 @@ def test_validation_step_applies_the_parity_combination(monkeypatch):
     assert "val_loss" in names and any(n.startswith("val/") for n in names)
 
 
-class _MetricSpy(torch.nn.Module):
-    """Module wrapper so it can replace an entry of ``model.metrics`` (a ``ModuleList``)."""
-
-    def __init__(self, metric):
-        super().__init__()
-        self.metric = metric
-        self.preds = []
-
-    def forward(self, preds, *args):
-        self.preds.append(preds)
-        return self.metric(preds, *args)
-
-
 # ---------------------------------------------------------------------------------------------
 # public contract of fingerprint / encoding
 
@@ -223,9 +225,41 @@ def test_encoding_is_unchanged():
 def test_rejects_nonzero_odd_task_target_mean():
     transform = UnscaleTransform(mean=[0.0, 1.0, 2.0, 3.0], scale=[1.0] * 4)
     predictor = RegressionFFN(n_tasks=4, input_dim=D_H, output_transform=transform)
-    with pytest.raises(ValueError, match=r"with_mean=False") as e:
+    with pytest.raises(ValueError, match=r"scaler\.mean_\[odd_cols\] = 0\.0") as e:
         _model(predictor=predictor, task_parity=[ODD, ODD, EVEN, ODD])
     assert "[1, 3]" in str(e.value)
+
+
+def _targets_with_nonzero_means():
+    rng = np.random.default_rng(0)
+    return rng.normal(loc=[3.0, -2.0, 5.0], scale=[1.0, 2.0, 0.5], size=(20, 3))
+
+
+def test_rejects_with_mean_false_scaler():
+    # pitfall: with_mean=False still sets mean_, and from_standard_scaler copies it
+    scaler = StandardScaler(with_mean=False).fit(_targets_with_nonzero_means())
+    assert np.all(scaler.mean_ != 0)
+    transform = UnscaleTransform.from_standard_scaler(scaler)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
+    with pytest.raises(ValueError, match=r"\[0\]"):
+        _model(predictor=predictor)
+
+
+@torch.no_grad()
+def test_accepts_scaler_with_zeroed_odd_mean():
+    Y = _targets_with_nonzero_means()
+    scaler = StandardScaler().fit(Y)
+    odd_cols = [i for i, p in enumerate(PARITY) if p == ODD]
+    scaler.mean_[odd_cols] = 0.0
+    # transform and unscale stay consistent: odd column is only divided by its scale
+    np.testing.assert_allclose(scaler.transform(Y)[:, 0], Y[:, 0] / scaler.scale_[0])
+
+    transform = UnscaleTransform.from_standard_scaler(scaler)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
+    feat, bmg = _featurize(rxn_smis)
+    model = _model(feat, predictor=predictor).eval()
+    f = model(bmg)
+    torch.testing.assert_close(model(_reverse(feat, bmg))[:, 0], -f[:, 0], rtol=0, atol=1e-5)
 
 
 def test_accepts_nonzero_mean_on_even_and_free_tasks():

@@ -104,9 +104,14 @@ class ParityEquivariantMPNN(MPNN):
         if bad:
             raise ValueError(
                 f"The predictor's output transform has a nonzero mean on odd task(s) {bad}. "
-                "The mean cancels in the odd combination, which would bias those predictions; "
-                "fit the target scaler with with_mean=False on odd task columns (or set their "
-                "mean to zero)."
+                "The mean cancels in the odd combination, which would bias those predictions "
+                "by -mean. Zero the odd columns of the fitted scaler before normalizing the "
+                "datasets and building the transform: `scaler = StandardScaler().fit(Y_train)`; "
+                "`scaler.mean_[odd_cols] = 0.0`; `dset.normalize_targets(scaler)` for the "
+                "training and validation datasets; then "
+                "`UnscaleTransform.from_standard_scaler(scaler)`. Note that "
+                "StandardScaler(with_mean=False) does not work: it still sets `mean_`, which "
+                "`from_standard_scaler` copies."
             )
 
     @classmethod
@@ -154,6 +159,12 @@ class ParityEquivariantMPNN(MPNN):
         """Generate parity-equivariant predictions for the input reactions"""
         return self._combine(self.predictor(self._paired_fingerprint(bmg, V_d, X_d)))
 
+    def _train_preds(
+        self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
+    ) -> Tensor:
+        """Combined ``predictor.train_step`` output, as the training objective sees it."""
+        return self._combine(self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d)))
+
     # The parent's training/validation steps call `fingerprint` and `predictor.train_step`
     # directly, bypassing `forward`; these mirror them with only the preds computation changed.
     def training_step(self, batch: BatchType, batch_idx):
@@ -163,7 +174,7 @@ class ParityEquivariantMPNN(MPNN):
         mask = targets.isfinite()
         targets = targets.nan_to_num(nan=0.0)
 
-        preds = self._combine(self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d)))
+        preds = self._train_preds(bmg, V_d, X_d)
         l = self.criterion(preds, targets, mask, weights, lt_mask, gt_mask)
 
         self.log("train_loss", self.criterion, batch_size=batch_size, prog_bar=True, on_epoch=True)
@@ -179,6 +190,6 @@ class ParityEquivariantMPNN(MPNN):
         mask = targets.isfinite()
         targets = targets.nan_to_num(nan=0.0)
 
-        preds = self._combine(self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d)))
+        preds = self._train_preds(bmg, V_d, X_d)
         self.metrics[-1](preds, targets, mask, weights, lt_mask, gt_mask)
         self.log("val_loss", self.metrics[-1], batch_size=batch_size, prog_bar=True)
