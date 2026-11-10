@@ -89,3 +89,9 @@ def test_rejects_wrong_length_task_parity():
 def test_rejects_invalid_parity_value():
     with pytest.raises(ValueError, match="parity"):
         build_parity_mask([ODD, 2], RegressionFFN(n_tasks=2))
+
+
+@pytest.mark.parametrize("bad", [0.7, -1.0, True, False, "odd", None])
+def test_rejects_non_integer_parity_value(bad):
+    with pytest.raises(ValueError, match="Invalid parity values"):
+        build_parity_mask([ODD, bad], RegressionFFN(n_tasks=2))

@@ -32,6 +32,7 @@ import lightning.pytorch as pl
 from chemprop.data import ReactionDatapoint, ReactionDataset, build_dataloader
 from chemprop.nn import BondMessagePassing, MeanAggregation, RegressionFFN
 from chemprop.nn.transforms import UnscaleTransform
+import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 from chemprop_contrib.reaction_parity import (
@@ -44,7 +45,7 @@ cols = ["dH", "lambda", "Ea"]
 with open("reactions.csv") as f:  # atom-mapped reaction SMILES in "smiles"
     rows = list(csv.DictReader(f))
 
-featurizer = ParityCGRFeaturizer()
+featurizer = ParityCGRFeaturizer()  # not chemprop's CondensedGraphOfReactionFeaturizer
 dps = [
     ReactionDatapoint.from_smi(
         r["smiles"], y=[float(r[c]) for c in cols], keep_h=True, add_h=False
@@ -59,6 +60,7 @@ val_dset = ReactionDataset(dps[n_train:], featurizer=featurizer)
 scaler = StandardScaler().fit(train_dset.Y)
 odd_cols = [i for i, p in enumerate(task_parity) if p == ODD]
 scaler.mean_[odd_cols] = 0.0
+scaler.scale_[odd_cols] = np.sqrt(np.nanmean(train_dset.Y[:, odd_cols] ** 2, axis=0))
 train_dset.normalize_targets(scaler)
 val_dset.normalize_targets(scaler)
 output_transform = UnscaleTransform.from_standard_scaler(scaler)
@@ -79,27 +81,33 @@ trainer.fit(model, train_loader, val_loader)
 preds = trainer.predict(model, val_loader)  # list of (batch, n_tasks) tensors
 ```
 
-Reactions must be atom-mapped and built with `keep_h=True`. `tests/test_models.py` contains a complete training setup on a bundled fixture.
+Reactions must be atom-mapped and built with `keep_h=True`, and the datasets must use `ParityCGRFeaturizer`. `tests/test_models.py` contains a complete training setup on a bundled fixture.
 
 ## Things to know
 
-**Odd-task targets need a zero-mean scaler.** The output transform unscales as `X·scale + mean`, and the mean cancels in the odd combination, so a nonzero mean on an odd column silently biases every odd prediction by `−mean`. Fit the scaler, zero its mean on the odd columns, and only then normalize the datasets and build the transform, as in the example above. `StandardScaler(with_mean=False)` does **not** work: it still sets `mean_`, which `UnscaleTransform.from_standard_scaler` copies. The model checks this at construction and raises a `ValueError` with this recipe. Even and free tasks keep their means.
+**Use `ParityCGRFeaturizer`, not Chemprop's CGR featurizer.** Chemprop's `CondensedGraphOfReactionFeaturizer` produces features of the same size, so a model given such data cannot tell. Its features are not in the `(s, d)` basis, though, and predictions on real reversed reactions are then only approximately odd or even. `ParityEquivariantMPNN.from_featurizer` raises `TypeError` for any other featurizer; the plain constructor cannot check this.
 
-**Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks across the two passes make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you.
+**Odd-task targets need a zero-mean scaler.** The output transform unscales as `X·scale + mean`, and the mean cancels in the odd combination, so a nonzero mean on an odd column silently biases every odd prediction by `−mean`. Fit the scaler, zero its mean on the odd columns, and only then normalize the datasets and build the transform, as in the example above. The example also resets the odd columns' scale to their root mean square `sqrt(mean(y²))`. After zeroing the mean, `scale_` is still the standard deviation about the old mean, so for data that mostly runs in one direction (`|mean| ≫ std`) the scaled odd targets would be far from unit size. Predictions are unbiased either way; the RMS scale only keeps the training targets well-conditioned. `StandardScaler(with_mean=False)` does **not** work: it still sets `mean_`, which `UnscaleTransform.from_standard_scaler` copies. The model checks this at construction and raises a `ValueError` with this recipe. Even and free tasks keep their means.
 
-**Extra descriptors must be direction-invariant.** `X_d` is appended identically to the forward and reversed passes, so it is treated as invariant under reversal. Reaction conditions such as temperature or solvent are fine. Direction-dependent descriptors (for example reactant-side-only descriptors) break exactness unless you symmetrise them or fold them into the graph.
+**Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks across the two passes make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you. Call `model.train()` again before any further `trainer.fit`: Lightning trains a module in the mode it was left in, and in eval mode the output transform is active, so the model would fit unscaled predictions to scaled targets and fail to learn.
+
+**Extra descriptors must be direction-invariant.** `X_d` (and per-atom `V_d`, which `ReactionDataset` does not currently produce) is passed identically to the forward and reversed passes, so it is treated as invariant under reversal. Reaction conditions such as temperature or solvent are fine. Direction-dependent descriptors (for example reactant-side-only descriptors) break exactness unless you symmetrise them or fold them into the graph.
+
+**Atom and bond feature scaling is fine.** A `graph_transform` on the message passing runs inside the encoder, after the reversal, so it is just part of the network `g` and exactness is unaffected.
 
 **`fingerprint` is direction-dependent.** `model.fingerprint(...)` returns the forward-direction fingerprint only, with the usual shape. The parity structure lives in the combination of predictor outputs, not in the fingerprint.
 
-**Loading saved models.** Use `ParityEquivariantMPNN.load_from_file` or `ParityEquivariantMPNN.load_from_checkpoint`. Chemprop's generic `MPNN.load_from_file`, `chemprop.models.utils.load_model` and the `chemprop predict` CLI cannot rebuild this class (they raise a `TypeError` about `odd_atom_start`).
+**Loading saved models.** Use `ParityEquivariantMPNN.load_from_file` or `ParityEquivariantMPNN.load_from_checkpoint`. Chemprop's generic `MPNN.load_from_file`, `chemprop.models.utils.load_model` and the `chemprop predict` and `chemprop fingerprint` CLIs cannot rebuild this class (they raise a `TypeError` about `odd_atom_start`).
 
 ## Unsupported combinations
 
 Construction raises `ValueError` for:
 
 - predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. Variance, evidential and quantile-interval components are combined as even, so they stay valid;
-- a non-identity `graph_transform` on the message passing (atom/bond feature scaling), which breaks equivariance;
+- a `task_parity` entry other than `ODD`, `EVEN` or `FREE` (floats and booleans are rejected, not truncated);
 - a nonzero output-transform mean on an odd task.
+
+Reaction-plus-molecule inputs (for example a reaction with a solvent, via `MulticomponentMPNN`) are not supported: `ParityEquivariantMPNN` takes a single reaction graph.
 
 `CuikmolmakerCGRFeaturizer` is not supported, since it cannot express the `(s, d)` layout. There is no CLI integration; use the Python API.
 

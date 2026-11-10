@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import operator
 
 import torch
 from torch import Tensor
@@ -19,6 +20,28 @@ _VALID_PARITIES = (ODD, EVEN, FREE)
 # subclass (e.g. SpectralFFN, whose output is a normalised positive spectrum) must be rejected
 # rather than admitted silently.
 _ALLOWED_PREDICTORS = frozenset({RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN})
+
+
+def normalize_task_parity(task_parity: Sequence[int]) -> list[int]:
+    """Validate ``task_parity`` and return it as a list of plain ``int``.
+
+    Integer-like values (``numpy`` or ``torch`` integer scalars) are accepted; floats, booleans
+    and any value outside ``ODD``, ``EVEN``, ``FREE`` raise ``ValueError``, so that e.g. ``0.7``
+    is never truncated to ``FREE``.
+    """
+    out, bad = [], []
+    for p in task_parity:
+        try:
+            value = None if isinstance(p, bool) else operator.index(p)
+        except TypeError:
+            value = None
+        if value not in _VALID_PARITIES:
+            bad.append(p)
+        else:
+            out.append(value)
+    if bad:
+        raise ValueError(f"Invalid parity values {bad}; each must be one of ODD, EVEN, FREE.")
+    return out
 
 
 def build_parity_mask(task_parity: Sequence[int], predictor: Predictor) -> Tensor:
@@ -39,15 +62,12 @@ def build_parity_mask(task_parity: Sequence[int], predictor: Predictor) -> Tenso
         raise ValueError(
             f"Parity masks are only defined for {allowed}; got {type(predictor).__name__}."
         )
-    task_parity = list(task_parity)
+    task_parity = normalize_task_parity(task_parity)
     if len(task_parity) != predictor.n_tasks:
         raise ValueError(
             f"task_parity has length {len(task_parity)} but predictor has "
             f"n_tasks={predictor.n_tasks}."
         )
-    bad = [p for p in task_parity if p not in _VALID_PARITIES]
-    if bad:
-        raise ValueError(f"Invalid parity values {bad}; each must be one of ODD, EVEN, FREE.")
 
     mask = torch.tensor(task_parity, dtype=torch.get_default_dtype())
     if predictor.n_targets == 1:

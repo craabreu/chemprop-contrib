@@ -10,10 +10,15 @@ from chemprop.models.model import BatchType
 from chemprop.nn import Aggregation, MessagePassing, Predictor
 from chemprop.nn.transforms import UnscaleTransform
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
-from chemprop_contrib.reaction_parity.parity import FREE, ODD, build_parity_mask
+from chemprop_contrib.reaction_parity.parity import (
+    FREE,
+    ODD,
+    build_parity_mask,
+    normalize_task_parity,
+)
 
 
 class ParityEquivariantMPNN(MPNN):
@@ -47,7 +52,7 @@ class ParityEquivariantMPNN(MPNN):
     Raises
     ------
     ValueError
-        if ``message_passing.graph_transform`` is not :class:`~torch.nn.Identity`; if the
+        if ``task_parity`` holds a value other than ``ODD``, ``EVEN`` or ``FREE``; if the
         predictor is not one of the regression predictors supported by
         :func:`~chemprop_contrib.reaction_parity.parity.build_parity_mask`, or ``task_parity``
         is invalid for it; or if the predictor's output transform has a nonzero mean on an
@@ -55,8 +60,15 @@ class ParityEquivariantMPNN(MPNN):
 
     Notes
     -----
-    Extra descriptors ``X_d`` are appended identically to both passes, so they must be
-    direction-invariant.
+    Inputs must come from :class:`ParityCGRFeaturizer`. Chemprop's own CGR featurizer has the
+    same dimensions, so the model cannot detect it; :meth:`from_featurizer` rejects it.
+
+    Extra descriptors ``X_d`` and extra atom descriptors ``V_d`` are passed identically to both
+    passes, so they must be direction-invariant.
+
+    Atom/bond feature scaling (``message_passing.graph_transform``) is allowed: it is applied
+    inside the encoder, after :func:`reverse_bmg`, so it is part of ``g`` and the combination
+    stays exact.
 
     :meth:`fingerprint` returns the forward-direction fingerprint only, so its shape is
     unchanged but it is direction-dependent; the parity structure lives in the combination of
@@ -78,26 +90,19 @@ class ParityEquivariantMPNN(MPNN):
         # frame hold plain ints
         odd_atom_start = self._as_start_index("odd_atom_start", odd_atom_start)
         odd_bond_start = self._as_start_index("odd_bond_start", odd_bond_start)
-        d_v, d_e = message_passing.hparams["d_v"], message_passing.hparams["d_e"]
-        if not 0 < odd_atom_start < d_v:
-            raise ValueError(
-                f"odd_atom_start must satisfy 0 < odd_atom_start < d_v = {d_v}, "
-                f"got {odd_atom_start}"
-            )
-        if not 0 < odd_bond_start < d_e:
-            raise ValueError(
-                f"odd_bond_start must satisfy 0 < odd_bond_start < d_e = {d_e}, "
-                f"got {odd_bond_start}"
-            )
-        task_parity = [int(p) for p in task_parity]
+        # the upper bounds are checked only when the message passing records its input dims
+        # (chemprop's built-in classes do; a custom MessagePassing may not)
+        hparams = getattr(message_passing, "hparams", None) or {}
+        for name, start, dim_key in (
+            ("odd_atom_start", odd_atom_start, "d_v"),
+            ("odd_bond_start", odd_bond_start, "d_e"),
+        ):
+            dim = hparams.get(dim_key)
+            if start <= 0 or (dim is not None and start >= dim):
+                bound = f"{dim_key} = {dim}" if dim is not None else dim_key
+                raise ValueError(f"{name} must satisfy 0 < {name} < {bound}, got {start}")
+        task_parity = normalize_task_parity(task_parity)
 
-        if not isinstance(message_passing.graph_transform, nn.Identity):
-            raise ValueError(
-                "ParityEquivariantMPNN requires message_passing.graph_transform to be "
-                f"nn.Identity, got {type(message_passing.graph_transform).__name__}. Scaling "
-                "atom/bond features before the encoder breaks parity equivariance; disable "
-                "atom and bond feature scaling."
-            )
         mask = build_parity_mask(task_parity, predictor)
         self._check_odd_task_mean(predictor, task_parity)
 
@@ -127,9 +132,10 @@ class ParityEquivariantMPNN(MPNN):
                 "The mean cancels in the odd combination, which would bias those predictions "
                 "by -mean. Zero the odd columns of the fitted scaler before normalizing the "
                 "datasets and building the transform: `scaler = StandardScaler().fit(Y_train)`; "
-                "`scaler.mean_[odd_cols] = 0.0`; `dset.normalize_targets(scaler)` for the "
-                "training and validation datasets; then "
-                "`UnscaleTransform.from_standard_scaler(scaler)`. Note that "
+                "`scaler.mean_[odd_cols] = 0.0`; optionally (recommended) `scaler.scale_"
+                "[odd_cols] = np.sqrt(np.nanmean(Y_train[:, odd_cols] ** 2, axis=0))`, the RMS "
+                "about zero; `dset.normalize_targets(scaler)` for the training and validation "
+                "datasets; then `UnscaleTransform.from_standard_scaler(scaler)`. Note that "
                 "StandardScaler(with_mean=False) does not work: it still sets `mean_`, which "
                 "`from_standard_scaler` copies."
             )
@@ -144,7 +150,21 @@ class ParityEquivariantMPNN(MPNN):
         task_parity: Sequence[int],
         **kwargs,
     ) -> ParityEquivariantMPNN:
-        """Build a model whose odd-block offsets are read from ``featurizer``."""
+        """Build a model whose odd-block offsets are read from ``featurizer``.
+
+        Raises
+        ------
+        TypeError
+            if ``featurizer`` is not a :class:`ParityCGRFeaturizer`. Chemprop's own CGR
+            featurizers have the same dimensions but not the ``(s, d)`` basis, so a model built
+            for them would silently lose exactness on real reversed reactions.
+        """
+        if not isinstance(featurizer, ParityCGRFeaturizer):
+            raise TypeError(
+                "from_featurizer requires a ParityCGRFeaturizer, got "
+                f"{type(featurizer).__name__}. Chemprop's CondensedGraphOfReactionFeaturizer has "
+                "the same dimensions but not the (s, d) basis that makes reversal a sign flip."
+            )
         return cls(
             message_passing,
             agg,

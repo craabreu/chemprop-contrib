@@ -291,12 +291,49 @@ def test_zero_mean_odd_task_is_unbiased():
     torch.testing.assert_close(model(_reverse(feat, bmg))[:, 0], -out[:, 0], rtol=0, atol=1e-5)
 
 
-def test_rejects_non_identity_graph_transform():
+def _scale_transform(d):
+    g = torch.Generator().manual_seed(d)
+    return ScaleTransform(
+        mean=torch.rand(d, generator=g).tolist(), scale=(0.5 + torch.rand(d, generator=g)).tolist()
+    )
+
+
+@pytest.mark.parametrize("rxn_smi", rxn_smis)
+def test_parity_is_exact_with_atom_and_bond_feature_scaling(rxn_smi):
+    # the graph transform runs inside the encoder, after reverse_bmg, so it is part of g: parity
+    # holds even with nonzero means on the odd (difference) columns
+    feat, bmg = _featurize([rxn_smi])
+    gt = GraphTransform(_scale_transform(feat.atom_fdim), _scale_transform(feat.bond_fdim))
+    assert torch.all(gt.V_transform.mean[0, feat.odd_atom_start :] != 0)
+    model = _model(feat, graph_transform=gt).eval()
+    _, bmg_rev = _featurize([reverse_rxn_smi(rxn_smi)], feat)
+    out, out_rev = model(bmg), model(bmg_rev)
+    torch.testing.assert_close(out_rev[:, 0], -out[:, 0], rtol=0, atol=1e-5)
+    torch.testing.assert_close(out_rev[:, 1], out[:, 1], rtol=0, atol=1e-5)
+    # the transform is active, not inert
+    plain = _model(feat).eval()
+    assert not torch.allclose(plain(bmg), out)
+
+
+def test_from_featurizer_rejects_stock_cgr_featurizer():
+    from chemprop.featurizers import CondensedGraphOfReactionFeaturizer
+
+    stock = CondensedGraphOfReactionFeaturizer(mode_="REAC_DIFF")
+    mp = BondMessagePassing(d_v=stock.atom_fdim, d_e=stock.bond_fdim, d_h=D_H)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    with pytest.raises(TypeError, match="ParityCGRFeaturizer"):
+        ParityEquivariantMPNN.from_featurizer(stock, mp, MeanAggregation(), predictor, PARITY)
+
+
+def test_start_index_upper_bound_skipped_without_message_passing_dims(monkeypatch):
     feat = ParityCGRFeaturizer()
-    V_t = ScaleTransform(mean=[0.0] * feat.atom_fdim, scale=[1.0] * feat.atom_fdim)
-    E_t = ScaleTransform(mean=[0.0] * feat.bond_fdim, scale=[1.0] * feat.bond_fdim)
-    with pytest.raises(ValueError, match="graph_transform"):
-        _model(feat, graph_transform=GraphTransform(V_t, E_t))
+    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
+    monkeypatch.setattr(type(mp), "hparams", property(lambda self: {}))
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    model = ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, PARITY)
+    assert model.odd_atom_start == feat.odd_atom_start
+    with pytest.raises(ValueError, match="odd_atom_start must satisfy 0 < odd_atom_start < d_v,"):
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, 0, feat.odd_bond_start, PARITY)
 
 
 def test_rejects_disallowed_predictor():
@@ -340,6 +377,18 @@ def test_rejects_wrong_task_parity_length():
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="n_tasks"):
         _model(predictor=predictor, task_parity=[ODD, EVEN])
+
+
+@pytest.mark.parametrize("bad", [[-0.5, 0.7, 1.9], [ODD, True, FREE], [ODD, EVEN, 1.0]])
+def test_rejects_non_integer_task_parity(bad):
+    with pytest.raises(ValueError, match="Invalid parity values"):
+        _model(task_parity=bad)
+
+
+def test_accepts_numpy_integer_task_parity():
+    model = _model(task_parity=np.array(PARITY))
+    assert model.task_parity == PARITY
+    assert all(type(p) is int for p in model.task_parity)
 
 
 def test_task_parity_and_mask_are_stored():
@@ -535,9 +584,12 @@ def _datasets(feat, n_train=N_TRAIN, n_val=N_VAL):
     ]
     train = ReactionDataset(dps[:n_train], featurizer=feat)
     val = ReactionDataset(dps[n_train:], featurizer=feat)
-    # supported scaler recipe: zero the odd columns' mean so it cancels nowhere
+    # supported scaler recipe (as in the README): zero the odd columns' mean, and scale them by
+    # their root mean square about zero
     scaler = StandardScaler().fit(train.Y)
-    scaler.mean_[[i for i, p in enumerate(FIXTURE_PARITY) if p == ODD]] = 0.0
+    odd_cols = [i for i, p in enumerate(FIXTURE_PARITY) if p == ODD]
+    scaler.mean_[odd_cols] = 0.0
+    scaler.scale_[odd_cols] = np.sqrt(np.nanmean(train.Y[:, odd_cols] ** 2, axis=0))
     train.normalize_targets(scaler)
     val.normalize_targets(scaler)
     return train, val, UnscaleTransform.from_standard_scaler(scaler)
