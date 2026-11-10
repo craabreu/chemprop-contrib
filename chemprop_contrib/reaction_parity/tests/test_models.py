@@ -402,3 +402,63 @@ def test_output_shape_matches_plain_mpnn(cls):
     assert model._combine(model.predictor.train_step(model._paired_fingerprint(bmg))).shape == (
         plain.predictor.train_step(plain.fingerprint(bmg)).shape
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# R5 / R6: uncertainty predictors
+
+
+def _odd_even_outputs(cls, rxns=None):
+    """Eval-mode outputs ``(f, f_rev)``, each ``(B, 2, n_targets)``, for tasks ``[ODD, EVEN]``."""
+    feat, bmg = _featurize(rxns or [*rxn_smis, CHAIN_SMI])
+    predictor = cls(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
+    model = _model(feat, predictor=predictor, task_parity=[ODD, EVEN]).eval()
+    with torch.no_grad():
+        return model(bmg), model(_reverse(feat, bmg))
+
+
+def _assert_component_parity(f, f_rev):
+    # component 0 carries the task's parity (odd for task 0, even for task 1); every later
+    # component is even, so a positive uncertainty stays positive under reversal
+    torch.testing.assert_close(f_rev[:, 0, 0], -f[:, 0, 0], rtol=0, atol=1e-5)
+    torch.testing.assert_close(f_rev[:, 1, 0], f[:, 1, 0], rtol=0, atol=1e-5)
+    torch.testing.assert_close(f_rev[..., 1:], f[..., 1:], rtol=0, atol=1e-5)
+
+
+def test_mve_variance_stays_positive_for_odd_task():
+    f, f_rev = _odd_even_outputs(MveFFN)
+    assert f.shape == (len(rxn_smis) + 1, 2, 2)
+    for out in (f, f_rev):
+        assert (out[..., 1] > 0).all()
+    _assert_component_parity(f, f_rev)
+
+
+def test_evidential_params_stay_positive_for_odd_task():
+    f, f_rev = _odd_even_outputs(EvidentialFFN)
+    assert f.shape == (len(rxn_smis) + 1, 2, 4)
+    for out in (f, f_rev):
+        v, alpha, beta = out[..., 1], out[..., 2], out[..., 3]
+        assert (v > 0).all() and (alpha > 1).all() and (beta > 0).all()
+    _assert_component_parity(f, f_rev)
+
+
+def test_quantile_mean_is_odd_and_interval_is_even():
+    # the interval's sign is not guaranteed for an untrained model, so only its parity is checked
+    f, f_rev = _odd_even_outputs(QuantileFFN)
+    assert f.shape == (len(rxn_smis) + 1, 2, 2)
+    _assert_component_parity(f, f_rev)
+
+
+def test_mve_loss_is_finite_for_odd_task(monkeypatch):
+    # a negative variance would make the NLL NaN; every task here is odd, so the variance
+    # column must come out of the combination positive
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
+    predictor = MveFFN(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
+    model = _model(feat, predictor=predictor, task_parity=[ODD, ODD]).train()
+    _record_logs(model, monkeypatch)
+
+    assert (model._train_preds(bmg)[..., 1] > 0).all()
+    loss = model.training_step(_batch(bmg, n_tasks=2), 0)
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
