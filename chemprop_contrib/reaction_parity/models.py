@@ -155,6 +155,9 @@ class ParityEquivariantMPNN(MPNN):
 
         Raises
         ------
+        ValueError
+            if ``message_passing`` records input widths ``d_v``/``d_e`` that differ from the
+            featurizer's ``atom_fdim``/``bond_fdim``.
         TypeError
             if ``featurizer`` is not a :class:`ParityCGRFeaturizer`. Chemprop's own CGR
             featurizers are not in the ``(s, d)`` basis, so a model built for them would
@@ -166,6 +169,15 @@ class ParityEquivariantMPNN(MPNN):
                 f"{type(featurizer).__name__}. Chemprop's CondensedGraphOfReactionFeaturizer is "
                 "not in the (s, d) basis that makes reversal a sign flip."
             )
+        hparams = getattr(message_passing, "hparams", None) or {}
+        for key, fdim in (("d_v", featurizer.atom_fdim), ("d_e", featurizer.bond_fdim)):
+            dim = hparams.get(key)
+            if dim is not None and dim != fdim:
+                raise ValueError(
+                    f"message_passing has {key} = {dim} but the featurizer emits {fdim} "
+                    "features; build the message passing from featurizer.atom_fdim and "
+                    "featurizer.bond_fdim."
+                )
         return cls(
             message_passing,
             agg,

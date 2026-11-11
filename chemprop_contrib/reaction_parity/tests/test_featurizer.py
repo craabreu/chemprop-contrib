@@ -115,3 +115,10 @@ def test_accepts_element_changing_maps():
 def test_rejects_explicit_mode():
     with pytest.raises(ValueError, match="does not accept"):
         ParityCGRFeaturizer(mode_="REAC_PROD")
+
+
+def test_balanced_and_mode_are_keyword_only():
+    feat = ParityCGRFeaturizer()
+    with pytest.raises(TypeError):
+        ParityCGRFeaturizer(feat.atom_featurizer, feat.bond_featurizer, True)
+    assert ParityCGRFeaturizer(feat.atom_featurizer, feat.bond_featurizer, balanced=True).balanced

@@ -325,6 +325,17 @@ def test_from_featurizer_rejects_stock_cgr_featurizer():
         ParityEquivariantMPNN.from_featurizer(stock, mp, MeanAggregation(), predictor, PARITY)
 
 
+@pytest.mark.parametrize("which", ["d_v", "d_e"])
+def test_from_featurizer_rejects_encoder_width_mismatch(which):
+    feat = ParityCGRFeaturizer()
+    d_v = feat.atom_fdim - (1 if which == "d_v" else 0)
+    d_e = feat.bond_fdim - (1 if which == "d_e" else 0)
+    mp = BondMessagePassing(d_v=d_v, d_e=d_e, d_h=D_H)
+    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
+    with pytest.raises(ValueError, match=f"{which} = .* but the featurizer"):
+        ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, PARITY)
+
+
 def test_start_index_upper_bound_skipped_without_message_passing_dims(monkeypatch):
     feat = ParityCGRFeaturizer()
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)

@@ -14,7 +14,7 @@ which no mapped atom changes element.
 from __future__ import annotations
 
 import copy
-from dataclasses import InitVar, dataclass
+from dataclasses import KW_ONLY, InitVar, dataclass
 from typing import Iterable
 
 from chemprop.data.collate import BatchMolGraph
@@ -51,6 +51,8 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
     keeps its element, which this featurizer does not.
     """
 
+    # keyword-only, so that a third positional argument cannot land in ``mode_``
+    _: KW_ONLY
     balanced: bool = False
     mode_: InitVar[str | RxnMode | None] = None
 
