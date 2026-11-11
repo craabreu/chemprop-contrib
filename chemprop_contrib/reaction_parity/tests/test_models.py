@@ -24,7 +24,7 @@ from chemprop_contrib.reaction_parity.models import ParityEquivariantMPNN
 from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
 
 from . import make_test_data
-from .conftest import make_rxn, reverse_rxn_smi, rxn_smis
+from .conftest import alchemical_smis, make_rxn, reverse_rxn_smi, rxn_smis
 
 D_H = 16
 PARITY = [ODD, EVEN, FREE]
@@ -211,6 +211,27 @@ def test_fingerprint_keeps_batch_dim_B():
     paired = model._paired_fingerprint(bmg)
     assert paired.shape == (2 * len(bmg), D_H)
     torch.testing.assert_close(paired[: len(bmg)], fp, rtol=0, atol=1e-6)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("batch_norm", [False, True])
+def test_paired_fingerprint_equals_two_separate_encoder_passes(batch_norm):
+    # the single stacked pass must compute exactly what encoding x and x̄ separately computes
+    d_vd, d_xd = 3, 2
+    feat, bmg = _featurize(rxn_smis + alchemical_smis + [CHAIN_SMI])
+    model = _model(feat, batch_norm=batch_norm, d_vd=d_vd, d_xd=d_xd).double().eval()
+    bmg.V, bmg.E = bmg.V.double(), bmg.E.double()
+    gen = torch.Generator().manual_seed(0)
+    V_d = torch.randn(bmg.V.shape[0], d_vd, generator=gen, dtype=torch.float64)
+    X_d = torch.randn(len(bmg), d_xd, generator=gen, dtype=torch.float64)
+
+    H_f = model.agg(model.message_passing(bmg, V_d), bmg.batch)
+    H_r = model.agg(model.message_passing(_reverse(feat, bmg), V_d), bmg.batch)
+    H = model.bn(torch.cat([H_f, H_r]))
+    expected = torch.cat((H, model.X_d_transform(X_d).repeat(2, 1)), dim=1)
+
+    actual = model._paired_fingerprint(bmg, V_d, X_d)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=1e-12)
 
 
 @torch.no_grad()
@@ -436,7 +457,7 @@ def test_extra_descriptors_reach_both_passes():
     torch.testing.assert_close(f_rev[:, 1], f[:, 1], rtol=0, atol=1e-5)
 
 
-def test_v_d_is_forwarded_to_both_passes(monkeypatch):
+def test_v_d_is_forwarded_to_forward_and_reversed_graphs(monkeypatch):
     d_vd = 3
     feat, bmg = _featurize(rxn_smis)
     model = _model(feat, d_vd=d_vd).eval()
@@ -452,10 +473,13 @@ def test_v_d_is_forwarded_to_both_passes(monkeypatch):
     monkeypatch.setattr(model.message_passing, "forward", spy)
     with torch.no_grad():
         f = model(bmg, V_d=V_d)
-    assert len(seen) == 2
-    assert seen[0][1] is V_d and seen[1][1] is V_d
-    assert seen[0][0] is bmg
-    torch.testing.assert_close(seen[1][0].V, _reverse(feat, bmg).V, rtol=0, atol=0)
+    # one encoder pass over the forward graphs followed by the reversed ones
+    assert len(seen) == 1
+    both, V_d_seen = seen[0]
+    n = bmg.V.shape[0]
+    torch.testing.assert_close(both.V[:n], bmg.V, rtol=0, atol=0)
+    torch.testing.assert_close(both.V[n:], _reverse(feat, bmg).V, rtol=0, atol=0)
+    torch.testing.assert_close(V_d_seen, torch.cat((V_d, V_d)), rtol=0, atol=0)
 
     with torch.no_grad():
         f_rev = model(_reverse(feat, bmg), V_d=V_d)

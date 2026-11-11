@@ -14,6 +14,7 @@ which no mapped atom changes element.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from dataclasses import KW_ONLY, InitVar, dataclass
 from typing import Iterable
 
@@ -24,6 +25,7 @@ from chemprop.featurizers.molgraph.reaction import (
 )
 import numpy as np
 from rdkit.Chem.rdchem import Bond, Mol
+import torch
 
 
 @dataclass
@@ -137,4 +139,52 @@ def reverse_bmg(bmg: BatchMolGraph, odd_atom_start: int, odd_bond_start: int) ->
     out = copy.copy(bmg)
     out.V = V
     out.E = E
+    return out
+
+
+# the BatchMolGraph fields stack_reversed_bmg knows how to stack; the size is name-mangled
+_STACKED_FIELDS = {"V", "E", "edge_index", "rev_edge_index", "batch", "_BatchMolGraph__size"}
+
+
+def stack_reversed_bmg(
+    bmg: BatchMolGraph, odd_atom_start: int, odd_bond_start: int
+) -> BatchMolGraph:
+    """Stack a batch and its reversal into one batch of ``2B`` graphs.
+
+    Graphs ``0..B-1`` are the input and graphs ``B..2B-1`` their reversals, in the same order,
+    so one encoder pass computes what :func:`reverse_bmg` and two passes would. The result
+    equals chemprop's collate of the forward graphs followed by the reversed ones. The input
+    is not modified.
+
+    Parameters
+    ----------
+    bmg : BatchMolGraph
+        batch featurized with :class:`ParityCGRFeaturizer`
+    odd_atom_start : int
+        first node-feature column of the odd block
+    odd_bond_start : int
+        first edge-feature column of the odd block
+
+    Raises
+    ------
+    TypeError
+        if the batch carries fields or attributes other than chemprop's ``BatchMolGraph``
+        ones, which this function would otherwise silently leave out of the result
+    """
+    names = {f.name for f in dataclasses.fields(bmg)} | set(getattr(bmg, "__dict__", {}))
+    if unknown := sorted(names - _STACKED_FIELDS):
+        raise TypeError(
+            f"cannot stack a {type(bmg).__name__} with fields {unknown}; only the fields of "
+            "chemprop's BatchMolGraph (V, E, edge_index, rev_edge_index, batch) are supported."
+        )
+    rev = reverse_bmg(bmg, odd_atom_start, odd_bond_start)
+    n_atoms, n_edges = bmg.V.shape[0], bmg.E.shape[0]
+
+    out = copy.copy(bmg)
+    out.V = torch.cat((bmg.V, rev.V))
+    out.E = torch.cat((bmg.E, rev.E))
+    out.edge_index = torch.cat((bmg.edge_index, bmg.edge_index + n_atoms), dim=1)
+    out.rev_edge_index = torch.cat((bmg.rev_edge_index, bmg.rev_edge_index + n_edges))
+    out.batch = torch.cat((bmg.batch, bmg.batch + len(bmg)))
+    out._BatchMolGraph__size = 2 * len(bmg)
     return out

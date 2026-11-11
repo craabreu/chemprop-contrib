@@ -19,9 +19,9 @@ A standard Chemprop reaction model satisfies this only by accident, and nothing 
 ## How it works
 
 1. `ParityCGRFeaturizer` emits CGR features in an `(s, d)` basis, with `s` the mean of the reactant-side and product-side features and `d` their difference. In this basis, reversing a reaction is a sign flip on the contiguous `d` block, so no second featurization is needed. Every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)).
-2. `ParityEquivariantMPNN` runs the same network (shared weights) on the batch and on its reversal (`reverse_bmg`), then combines the outputs per task: `½[g(x) − g(x̄)]` for odd, `½[g(x) + g(x̄)]` for even, `g(x)` for free. The guarantee holds for any network `g`.
+2. `ParityEquivariantMPNN` runs the same network (shared weights) on the batch and on its reversal, then combines the outputs per task: `½[g(x) − g(x̄)]` for odd, `½[g(x) + g(x̄)]` for even, `g(x)` for free. The guarantee holds for any network `g`.
 
-The cost is two forward passes per batch.
+Both directions go through the encoder in a single pass over a batch of twice as many graphs (`stack_reversed_bmg`). On RDB7 (small gas-phase reactions, batch size 64, one RTX 2080 SUPER), training takes about 15% longer than stock chemprop.
 
 ## Minimal example
 
@@ -105,7 +105,7 @@ On the side where an atom is absent it is a zero dummy atom: Chemprop's atom fea
 
 **Odd-task targets need a zero-mean scaler.** The output transform unscales as `X·scale + mean`, and the mean cancels in the odd combination, so a nonzero mean on an odd column silently biases every odd prediction by `−mean`. Fit the scaler, zero its mean on the odd columns, and only then normalize the datasets and build the transform, as in the example above. The example also resets the odd columns' scale to their root mean square `sqrt(mean(y²))`. After zeroing the mean, `scale_` is still the standard deviation about the old mean, so for data that mostly runs in one direction (`|mean| ≫ std`) the scaled odd targets would be far from unit size. Predictions are unbiased either way; the RMS scale only keeps the training targets well-conditioned. `StandardScaler(with_mean=False)` does **not** work: it still sets `mean_`, which `UnscaleTransform.from_standard_scaler` copies. The model checks this at construction and raises a `ValueError` with this recipe. Even and free tasks keep their means.
 
-**Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks across the two passes make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you. Call `model.train()` again before any further `trainer.fit`: Lightning trains a module in the mode it was left in, and in eval mode the output transform is active, so the model would fit unscaled predictions to scaled targets and fail to learn.
+**Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks for the forward and reversed copies make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you. Call `model.train()` again before any further `trainer.fit`: Lightning trains a module in the mode it was left in, and in eval mode the output transform is active, so the model would fit unscaled predictions to scaled targets and fail to learn.
 
 **Extra descriptors must be direction-invariant.** `X_d` (and per-atom `V_d`, which `ReactionDataset` does not currently produce) is passed identically to the forward and reversed passes, so it is treated as invariant under reversal. Reaction conditions such as temperature or solvent are fine. Direction-dependent descriptors (for example reactant-side-only descriptors) break exactness unless you symmetrise them or fold them into the graph.
 
@@ -122,6 +122,8 @@ Construction raises `ValueError` for:
 - predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. Variance, evidential and quantile-interval components are combined as even, so they stay valid;
 - a `task_parity` entry other than `ODD`, `EVEN` or `FREE` (floats and booleans are rejected, not truncated);
 - a nonzero output-transform mean on an odd task.
+
+Training and prediction raise `TypeError` for a batch class that carries fields or attributes beyond those of chemprop's `BatchMolGraph`, since the stacked batch would silently leave them out.
 
 Reaction-plus-molecule inputs (for example a reaction with a solvent, via `MulticomponentMPNN`) are not supported: `ParityEquivariantMPNN` takes a single reaction graph.
 

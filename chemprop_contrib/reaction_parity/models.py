@@ -12,7 +12,7 @@ from chemprop.nn.transforms import UnscaleTransform
 import torch
 from torch import Tensor
 
-from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
+from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, stack_reversed_bmg
 from chemprop_contrib.reaction_parity.parity import (
     FREE,
     ODD,
@@ -64,11 +64,11 @@ class ParityEquivariantMPNN(MPNN):
     the ``(s, d)`` basis; :meth:`from_featurizer` rejects it, but the plain constructor only
     sees dimensions and offsets and cannot tell.
 
-    Extra descriptors ``X_d`` and extra atom descriptors ``V_d`` are passed identically to both
-    passes, so they must be direction-invariant.
+    Extra descriptors ``X_d`` and extra atom descriptors ``V_d`` are passed identically to the
+    forward and reversed graphs, so they must be direction-invariant.
 
     Atom/bond feature scaling (``message_passing.graph_transform``) is allowed: it is applied
-    inside the encoder, after :func:`reverse_bmg`, so it is part of ``g`` and the combination
+    inside the encoder, after the reversal, so it is part of ``g`` and the combination
     stays exact.
 
     :meth:`fingerprint` returns the forward-direction fingerprint only, so its shape is
@@ -191,11 +191,14 @@ class ParityEquivariantMPNN(MPNN):
     def _paired_fingerprint(
         self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
     ) -> Tensor:
-        """Fingerprints of the forward and reversed batch, stacked as ``(2B, d)``."""
-        bmg_rev = reverse_bmg(bmg, self.odd_atom_start, self.odd_bond_start)
-        H_f = self.agg(self.message_passing(bmg, V_d), bmg.batch)
-        H_r = self.agg(self.message_passing(bmg_rev, V_d), bmg.batch)
-        H = self.bn(torch.cat([H_f, H_r], dim=0))
+        """Fingerprints of the forward and reversed batch, stacked as ``(2B, d)``.
+
+        Both run through the encoder in one pass over a ``2B``-graph batch, which is faster
+        than two passes and computes the same thing.
+        """
+        both = stack_reversed_bmg(bmg, self.odd_atom_start, self.odd_bond_start)
+        V_d = None if V_d is None else torch.cat((V_d, V_d))
+        H = self.bn(self.agg(self.message_passing(both, V_d), both.batch))
 
         return H if X_d is None else torch.cat((H, self.X_d_transform(X_d).repeat(2, 1)), dim=1)
 

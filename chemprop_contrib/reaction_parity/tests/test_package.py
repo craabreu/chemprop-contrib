@@ -4,6 +4,7 @@ def test_package_is_importable_from_namespace():
     assert {
         "ParityCGRFeaturizer",
         "reverse_bmg",
+        "stack_reversed_bmg",
         "ParityEquivariantMPNN",
         "build_parity_mask",
         "ODD",
