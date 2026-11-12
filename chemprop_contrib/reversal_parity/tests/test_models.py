@@ -18,10 +18,10 @@ import numpy as np
 import pytest
 import torch
 
-from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
-from chemprop_contrib.reaction_parity.models import ParityEquivariantMPNN
-from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
-from chemprop_contrib.reaction_parity.targets import ParityTargetTransform
+from chemprop_contrib.reversal_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
+from chemprop_contrib.reversal_parity.models import ParityEquivariantMPNN
+from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD
+from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 
 from . import make_test_data
 from .conftest import alchemical_smis, make_rxn, reverse_rxn_smi, rxn_smis

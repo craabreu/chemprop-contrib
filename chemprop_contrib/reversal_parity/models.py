@@ -12,9 +12,9 @@ from chemprop.nn.predictors import RegressionFFN
 import torch
 from torch import Tensor, nn
 
-from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, stack_reversed_bmg
-from chemprop_contrib.reaction_parity.parity import COMPONENT_POWERS, FREE, build_parity_mask
-from chemprop_contrib.reaction_parity.targets import ParityTargetTransform
+from chemprop_contrib.reversal_parity.featurizers import ParityCGRFeaturizer, stack_reversed_bmg
+from chemprop_contrib.reversal_parity.parity import COMPONENT_POWERS, FREE, build_parity_mask
+from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 
 
 class ParityEquivariantMPNN(MPNN):

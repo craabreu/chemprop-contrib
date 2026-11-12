@@ -11,7 +11,7 @@ from chemprop.nn.predictors import (
     SpectralFFN,
 )
 
-from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD, build_parity_mask
+from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD, build_parity_mask
 
 
 def test_constants():

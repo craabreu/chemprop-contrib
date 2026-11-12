@@ -29,7 +29,7 @@ Each package includes tests, which can be used to demonstrate the use of the pac
  - `set2set`: Chemprop-compatible implementation of the Set2Set aggregation function.
  - `sklearn_integration`: Scikit-learn style wrappers around Chemprop training and predicting routines.
  - `mixtures`: Order invariant architectures that accept any number of inputs. Useful for mixtures of molecules. 
- - `reaction_parity`: Reaction-property models that are exactly antisymmetric (odd), symmetric (even) or unconstrained (free) per task under reaction reversal, e.g. for reaction enthalpies; also covers alchemical transformations such as relative solvation free energies.
+ - `reversal_parity`: Reaction-property models that are exactly antisymmetric (odd), symmetric (even) or unconstrained (free) per task under reaction reversal, e.g. for reaction enthalpies; also covers alchemical transformations such as relative solvation free energies.
 
 # Contributing
 

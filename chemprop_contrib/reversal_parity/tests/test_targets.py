@@ -3,8 +3,8 @@ import pytest
 from sklearn.preprocessing import StandardScaler
 import torch
 
-from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
-from chemprop_contrib.reaction_parity.targets import ParityTargetTransform
+from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD
+from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 
 
 def _Y():

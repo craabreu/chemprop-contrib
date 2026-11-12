@@ -2,7 +2,7 @@ from chemprop.featurizers.molgraph.reaction import CondensedGraphOfReactionFeatu
 import numpy as np
 import pytest
 
-from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer
+from chemprop_contrib.reversal_parity.featurizers import ParityCGRFeaturizer
 
 from .conftest import alchemical_smis, make_rxn
 

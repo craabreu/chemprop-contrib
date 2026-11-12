@@ -4,7 +4,7 @@ from chemprop.data.collate import BatchMolGraph
 import pytest
 import torch
 
-from chemprop_contrib.reaction_parity.featurizers import (
+from chemprop_contrib.reversal_parity.featurizers import (
     ParityCGRFeaturizer,
     reverse_bmg,
     stack_reversed_bmg,

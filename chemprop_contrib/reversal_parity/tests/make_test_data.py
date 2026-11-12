@@ -1,4 +1,4 @@
-"""Generate ``test_data.csv`` for the reaction-parity tests.
+"""Generate ``test_data.csv`` for the reversal_parity tests.
 
 Usage::
 

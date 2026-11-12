@@ -1,4 +1,4 @@
-# `reaction_parity`
+# `reversal_parity`
 
 This `chemprop-contrib` package makes reaction-property predictions **exactly antisymmetric (or symmetric) under reaction reversal**, using the Condensed Graph of Reaction (CGR). The same holds for alchemical transformations between two molecules, such as phenol → toluene, of which chemical reactions are a special case.
 
@@ -34,7 +34,7 @@ import lightning.pytorch as pl
 from chemprop.data import ReactionDatapoint, ReactionDataset, build_dataloader
 from chemprop.nn import BondMessagePassing, MeanAggregation, RegressionFFN
 
-from chemprop_contrib.reaction_parity import (
+from chemprop_contrib.reversal_parity import (
     ParityCGRFeaturizer, ParityEquivariantMPNN, ParityTargetTransform,
 )
 
@@ -154,7 +154,7 @@ Extra descriptors that flip sign under reversal, such as a reaction enthalpy use
 ## Tests
 
 ```
-pytest chemprop_contrib/reaction_parity/
+pytest chemprop_contrib/reversal_parity/
 ```
 
 The bundled fixture `tests/test_data.csv` is derived from Chemprop's `rxn.csv`; see `tests/data_provenance.txt`.

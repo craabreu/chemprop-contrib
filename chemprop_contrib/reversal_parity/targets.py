@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch import Tensor, nn
 
-from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
+from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD
 
 
 def _index(name: str, value, n_tasks: int) -> int:

@@ -1,4 +1,4 @@
-"""Shared helpers and fixtures for the reaction-parity tests."""
+"""Shared helpers and fixtures for the reversal_parity tests."""
 
 from __future__ import annotations
 
