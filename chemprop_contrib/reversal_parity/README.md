@@ -1,26 +1,26 @@
 # `reversal_parity`
 
-This `chemprop-contrib` package makes reaction-property predictions **exactly antisymmetric (or symmetric) under reaction reversal**, using the Condensed Graph of Reaction (CGR). The same holds for alchemical transformations between two molecules, such as phenol → toluene, of which chemical reactions are a special case.
+This `chemprop-contrib` package predicts properties of a transformation `A>>B` that behave **exactly** as they must when the transformation is reversed to `B>>A`. The transformation can be a chemical reaction or an alchemical transformation between two molecules, such as phenol → toluene. Either way it is given as atom-mapped SMILES and encoded as a Condensed Graph of Reaction (CGR).
 
-Thermochemical quantities such as the reaction enthalpy, free energy or energy satisfy
+Many such properties have a fixed behaviour under reversal. A reaction enthalpy or a relative solvation free energy changes sign,
 
 ```
 ΔH(A→B) = −ΔH(B→A)
 ```
 
-A standard Chemprop reaction model satisfies this only by accident, and nothing in the loss penalizes a violation. Other reaction properties are exactly symmetric under reversal, and others are neither. The requirement is therefore a *per-column parity*, which this package enforces by construction rather than by data augmentation. You declare it with `ParityTargetTransform`, which also scales the targets:
+a reorganization energy stays the same, and a forward barrier becomes the reverse barrier. A standard Chemprop model satisfies these relations only approximately, to the extent it learns them from data (for example from a training set augmented with reversed reactions). This package enforces them exactly, by construction, for each target column. You declare each column's behaviour with `ParityTargetTransform`, which also scales the targets. With `x̄` the reversed transformation:
 
 | Declaration | Behavior under reversal | Example target |
 |---|---|---|
 | `odd=[i]` | `f(x̄) = −f(x)` | ΔH, ΔG, ΔE, ΔΔG_solv |
 | `even=[i]` | `f(x̄) = +f(x)` | reorganization energy |
-| `paired_reverse={i: j}` | swaps columns `i` and `j` | forward and reverse barriers |
-| `paired_difference={i: j}` | column `i` becomes `i − j`; column `j` is odd | forward barrier and ΔE |
+| `paired_reverse={i: j}` | columns `i` and `j` swap: `f_i(x̄) = f_j(x)` | forward and reverse barriers |
+| `paired_difference={i: j}` | `f_i(x̄) = f_i(x) − f_j(x)`, and column `j` is odd | forward barrier and ΔE |
 | not listed | unconstrained (free) | any other target |
 
 ## How it works
 
-1. `ParityCGRFeaturizer` emits CGR features in an `(s, d)` basis, with `s` the mean of the reactant-side and product-side features and `d` their difference. In this basis, reversing a reaction is a sign flip on the contiguous `d` block, so no second featurization is needed. Every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)).
+1. `ParityCGRFeaturizer` emits CGR features in an `(s, d)` basis, with `s` the mean of the reactant-side and product-side features and `d` their difference. In this basis, reversing a transformation is a sign flip on the contiguous `d` block, so no second featurization is needed. Every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)).
 2. `ParityEquivariantMPNN` runs the same network (shared weights) on the batch and on its reversal, then combines the outputs per column: `½[g(x) − g(x̄)]` for odd, `½[g(x) + g(x̄)]` for even, `g(x)` for free. A pair is predicted from an even mean and an odd difference (see [Pairs](#pairs-barriers-and-other-two-direction-properties)). The guarantee holds for any network `g`.
 
 Both directions go through the encoder in a single pass over a batch of twice as many graphs (`stack_reversed_bmg`). On RDB7 (small gas-phase reactions, batch size 64, one RTX 2080 SUPER), training takes about 15% longer than stock chemprop.
@@ -101,7 +101,7 @@ Pairs need a plain `RegressionFFN`: uncertainty is not supported for them yet.
 
 ## Alchemical transformations
 
-The input `A>>B` does not have to be a chemical reaction. Any atom-mapped pair of molecules works, including alchemical transformations in which mapped atoms change element. An odd task then predicts a relative property, such as the relative solvation free energy `ΔΔG_solv(A→B) = ΔG_solv(B) − ΔG_solv(A)`, which is exactly antisymmetric under swapping `A` and `B`.
+Any atom-mapped pair of molecules `A>>B` works as input, including alchemical transformations in which mapped atoms change element. An odd task then predicts a relative property, such as the relative solvation free energy `ΔΔG_solv(A→B) = ΔG_solv(B) − ΔG_solv(A)`, which is exactly antisymmetric under swapping `A` and `B`.
 
 The atom map alone defines the topology of the transformation, as in alchemical free-energy methods. For phenol → toluene (hydrogens as counts):
 
@@ -119,7 +119,7 @@ On the side where an atom is absent it is a zero dummy atom: Chemprop's atom fea
 
 **Use `ParityCGRFeaturizer`, not Chemprop's CGR featurizer.** Chemprop's `CondensedGraphOfReactionFeaturizer` is not in the `(s, d)` basis, and a model built for it gives predictions on real reversed reactions that are only approximately odd or even. `ParityEquivariantMPNN.from_featurizer` raises `TypeError` for any other featurizer; the plain constructor only sees dimensions and offsets and cannot check this.
 
-**Scale targets with `ParityTargetTransform`, not the predictor.** The model combines the forward and reversed predictions in the scaled space and then unscales, so the predictor must not have its own `output_transform`, and the datasets must be normalized with `target.to_standard_scaler()`. Odd columns are scaled about zero (mean 0, root-mean-square scale): a shift is even, so it would break their parity. `fit` handles this, ignores missing values, and leaves even and free columns with their usual mean and standard deviation. The code cannot check that the datasets were normalized with the matching scaler, so build both from the same transform, as in the example. The model keeps its own copy of the transform, so one transform can serve several models, such as the members of an ensemble.
+**Scale targets with `ParityTargetTransform`, not the predictor.** The model combines the forward and reversed predictions in the scaled space and then unscales, so the predictor must not have its own `output_transform`, and the datasets must be normalized with `target.to_standard_scaler()`. Odd columns and the differences of pairs are scaled about zero (mean 0, root-mean-square scale): a shift is even, so it would break their parity. The two directions of a pair share one mean and scale. `fit` handles all of this, ignores missing values, and leaves even and free columns with their usual mean and standard deviation. The code cannot check that the datasets were normalized with the matching scaler, so build both from the same transform, as in the example. The model keeps its own copy of the transform, so one transform can serve several models, such as the members of an ensemble.
 
 **Exactness is for `eval()` only.** In train mode, batch-norm batch statistics and independent dropout masks for the forward and reversed copies make the construction approximate. In `eval()` the guarantee is exact (to float precision). Call `model.eval()` before checking parity yourself; `trainer.predict` does so for you. Call `model.train()` again before any further `trainer.fit`: Lightning trains a module in the mode it was left in, and in eval mode the target transform unscales, so the model would fit unscaled predictions to scaled targets and fail to learn.
 
