@@ -137,7 +137,7 @@ On the side where an atom is absent it is a zero dummy atom: Chemprop's atom fea
 
 Construction raises `ValueError` for:
 
-- predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. Variance, evidential and quantile-interval components are combined as even, so they stay valid;
+- predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. The uncertainty outputs (variance, evidential parameters, quantile interval) of an odd or even task are combined as even, so they stay valid; those of a free task are free, like its prediction;
 - a predictor with its own `output_transform`, or a different number of tasks than the target transform;
 - pairs with `MveFFN`, `EvidentialFFN` or `QuantileFFN`: uncertainty is not supported for pairs yet.
 

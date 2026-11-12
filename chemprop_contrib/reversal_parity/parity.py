@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 import operator
 
 import torch
@@ -54,12 +54,28 @@ def normalize_task_parity(task_parity: Sequence[int]) -> list[int]:
     return out
 
 
-def build_parity_mask(task_parity: Sequence[int], predictor: Predictor) -> Tensor:
-    """Build the mask applied to predictor outputs when combining forward and reversed passes.
+def build_parity_mask(
+    task_parity: Sequence[int], predictor: Predictor, free_uncertainty: Iterable[int] = ()
+) -> Tensor:
+    r"""Build the mask applied to predictor outputs when combining forward and reversed passes.
 
-    Component 0 of each task takes that task's parity; all later components (variance,
-    evidential parameters, interval upper bound) are ``EVEN``, since an odd combination of a
-    variance can be negative.
+    Component 0 of each task takes that task's parity. The later components (variance,
+    evidential parameters, interval width) describe its uncertainty:
+
+    - odd or even task: ``EVEN``. Reversal maps the value to itself up to sign, so its
+      uncertainty is unchanged. For a quantile interval this is the swap of an odd task's
+      bounds, :math:`L(\bar{x}) = -U(x)`.
+    - free task: ``FREE``, as nothing relates its values for :math:`x` and :math:`\bar{x}`.
+
+    Parameters
+    ----------
+    task_parity : Sequence[int]
+        parity of each task (``ODD``, ``EVEN`` or ``FREE``)
+    predictor : Predictor
+        the predictor whose outputs are combined
+    free_uncertainty : Iterable[int]
+        tasks whose later components are ``FREE`` whatever their parity, as for the forward
+        column of a pair: its two passes give the uncertainties of the pair's two directions
 
     Returns
     -------
@@ -84,4 +100,6 @@ def build_parity_mask(task_parity: Sequence[int], predictor: Predictor) -> Tenso
         return mask
     full = torch.ones(predictor.n_tasks, predictor.n_targets, dtype=mask.dtype)
     full[:, 0] = mask
+    full[mask == FREE, 1:] = FREE
+    full[list(free_uncertainty), 1:] = FREE
     return full

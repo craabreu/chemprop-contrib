@@ -39,9 +39,16 @@ def test_quantile_uses_the_generic_rule():
     assert torch.equal(mask, torch.tensor([[-1.0, 1.0]]))
 
 
-def test_free_task_component_zero_stays_free():
+def test_free_task_has_free_uncertainty_components():
+    # nothing relates a free task's values for x and its reversal, so nothing relates their
+    # uncertainties either
     mask = build_parity_mask((FREE, EVEN), MveFFN(n_tasks=2))
-    assert torch.equal(mask, torch.tensor([[0.0, 1.0], [1.0, 1.0]]))
+    assert torch.equal(mask, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
+
+
+def test_listed_tasks_get_free_uncertainty_components():
+    mask = build_parity_mask((EVEN, ODD), QuantileFFN(n_tasks=2), free_uncertainty=[0])
+    assert torch.equal(mask, torch.tensor([[1.0, 0.0], [-1.0, 1.0]]))
 
 
 @pytest.mark.parametrize(
