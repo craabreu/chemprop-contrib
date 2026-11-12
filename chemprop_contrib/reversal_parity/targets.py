@@ -57,20 +57,22 @@ class ParityTargetTransform(nn.Module):
 
     Every column not listed is free (unconstrained).
 
-    - ``odd``: :math:`f(\bar{x}) = -f(x)`, e.g. :math:`\Delta H`, :math:`\Delta\Delta G`
+    - ``odd``: :math:`f(\bar{x}) = -f(x)`, e.g. :math:`\Delta H`, :math:`\Delta\Delta G`,
+      :math:`\log K_{\text{eq}}`
     - ``even``: :math:`f(\bar{x}) = f(x)`
     - ``paired_reverse``: ``{forward: reverse}``, a property given in both directions, which
-      reversal swaps: :math:`f_\text{reverse}(x) = f_\text{forward}(\bar{x})`, as for the
-      forward and reverse barriers of a reaction
+      reversal swaps: :math:`f_{\text{rev}}(x) = f_{\text{fwd}}(\bar{x})`, as for the forward and
+      reverse barriers or the forward and reverse rate constants (:math:`\log k`) of a reaction
     - ``paired_difference``: ``{forward: difference}``, the same kind of property given by its
-      forward value and its difference, forward minus reverse (for barriers, the reaction
-      energy)
+      forward value and its difference :math:`f_{\text{diff}} = f_{\text{fwd}} - f_{\text{rev}}`
+      (for barriers, the reaction energy; for :math:`\log k`, :math:`\log K_{\text{eq}}`)
 
-    For a pair the model predicts an even mean :math:`B` and an odd difference :math:`D`, and
-    forward :math:`= B + D/2`, reverse :math:`= B - D/2`. The loss scores all three members of
-    a pair: a row whose two labels are known also scores the implied third, and a row with one
-    label scores that one, so both declarations train the same model on the same data. The
-    model outputs only the columns of the dataset.
+    The model predicts a pair from an even mean :math:`M` and an odd difference :math:`D`, as
+    :math:`f_{\text{fwd}} = M + \tfrac12 D`, :math:`f_{\text{rev}} = M - \tfrac12 D` and
+    :math:`f_{\text{diff}} = D`. The loss scores all three members of a pair: a row whose two
+    labels are known also scores the implied third, and a row with one label scores that one,
+    so both declarations train the same model on the same data. The model outputs only the
+    columns of the dataset.
 
     The model works in the scaled target space and applies this transform after combining the
     forward and reversed predictions. In train mode it returns scaled predictions, which the

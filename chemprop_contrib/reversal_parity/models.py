@@ -20,7 +20,7 @@ from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 class ParityEquivariantMPNN(MPNN):
     r"""An :class:`~chemprop.models.MPNN` that is exactly parity-equivariant under reversal.
 
-    With ``g`` the full stack (message passing, aggregation, batch norm, predictor) and
+    With :math:`g` the full stack (message passing, aggregation, batch norm, predictor) and
     :math:`\bar{x}` the reversed reaction, each output head is predicted as
 
     - odd:  :math:`\tfrac12[g(x) - g(\bar{x})]`, so :math:`f(\bar{x}) = -f(x)`
@@ -32,8 +32,11 @@ class ParityEquivariantMPNN(MPNN):
     columns are which is declared by ``target_transform``, which also scales the targets.
 
     Both passes share every weight, and are stacked on the batch dimension before batch norm
-    so that in train mode they see identical batch statistics. The guarantee is exact in
-    ``eval()``; in train mode, independent dropout masks make it approximate.
+    so that in train mode they see identical batch statistics. The guarantee is exact
+    whenever dropout is inactive, as in ``eval()``. With dropout active, the two passes get
+    independent masks, so a single draw is only approximately odd or even, although the
+    draws for :math:`\bar{x}` are distributed as the negated (odd) or unchanged (even) draws
+    for :math:`x`.
 
     Inputs must be featurized with :class:`ParityCGRFeaturizer`; prefer
     :meth:`from_featurizer`, which reads ``odd_atom_start`` and ``odd_bond_start`` from it.
@@ -46,9 +49,9 @@ class ParityEquivariantMPNN(MPNN):
         ``RegressionFFN``, ``MveFFN``, ``EvidentialFFN`` or ``QuantileFFN``, without an
         ``output_transform`` (the target transform does the unscaling)
     odd_atom_start : int
-        first node-feature column of the odd (``d``) block
+        first node-feature column of the odd (:math:`d`) block
     odd_bond_start : int
-        first edge-feature column of the odd (``d``) block
+        first edge-feature column of the odd (:math:`d`) block
     target_transform : ParityTargetTransform
         the parity of each target column and the target scaling; the model keeps a copy
 
@@ -65,14 +68,14 @@ class ParityEquivariantMPNN(MPNN):
     Notes
     -----
     Inputs must come from :class:`ParityCGRFeaturizer`. Chemprop's own CGR featurizer is not in
-    the ``(s, d)`` basis; :meth:`from_featurizer` rejects it, but the plain constructor only
+    the :math:`(m, d)` basis; :meth:`from_featurizer` rejects it, but the plain constructor only
     sees dimensions and offsets and cannot tell.
 
     Extra descriptors ``X_d`` and extra atom descriptors ``V_d`` are passed identically to the
     forward and reversed graphs, so they must be direction-invariant.
 
     Atom/bond feature scaling (``message_passing.graph_transform``) is allowed: it is applied
-    inside the encoder, after the reversal, so it is part of ``g`` and the combination
+    inside the encoder, after the reversal, so it is part of :math:`g` and the combination
     stays exact.
 
     :meth:`fingerprint` returns the forward-direction fingerprint only, so its shape is
@@ -91,7 +94,7 @@ class ParityEquivariantMPNN(MPNN):
         batch_norm: bool = False,
         **kwargs,
     ):
-        # normalised before MPNN.__init__ so that the hyperparameters it collects from this
+        # normalized before MPNN.__init__ so that the hyperparameters it collects from this
         # frame hold plain ints
         odd_atom_start = self._as_start_index("odd_atom_start", odd_atom_start)
         odd_bond_start = self._as_start_index("odd_bond_start", odd_bond_start)
@@ -191,14 +194,14 @@ class ParityEquivariantMPNN(MPNN):
             featurizer's ``atom_fdim``/``bond_fdim``.
         TypeError
             if ``featurizer`` is not a :class:`ParityCGRFeaturizer`. Chemprop's own CGR
-            featurizers are not in the ``(s, d)`` basis, so a model built for them would
+            featurizers are not in the :math:`(m, d)` basis, so a model built for them would
             silently lose exactness on real reversed reactions.
         """
         if not isinstance(featurizer, ParityCGRFeaturizer):
             raise TypeError(
                 "from_featurizer requires a ParityCGRFeaturizer, got "
                 f"{type(featurizer).__name__}. Chemprop's CondensedGraphOfReactionFeaturizer is "
-                "not in the (s, d) basis that makes reversal a sign flip."
+                "not in the (m, d) basis that makes reversal a sign flip."
             )
         hparams = getattr(message_passing, "hparams", None) or {}
         for key, fdim in (("d_v", featurizer.atom_fdim), ("d_e", featurizer.bond_fdim)):

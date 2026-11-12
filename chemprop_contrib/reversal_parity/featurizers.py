@@ -1,8 +1,9 @@
-"""CGR featurizer that emits features in the (sum, diff) basis.
+r"""CGR featurizer that emits features in the (mean, difference) basis.
 
-With ``x_r`` / ``x_p`` the reactant- and product-side feature vectors, this featurizer emits
-``(s, d)`` with ``s = (x_r + x_p) / 2`` and ``d = x_p - x_r``, so that reversing a reaction is a
-sign flip on the trailing ``d`` column block and leaves ``s`` untouched.
+With :math:`x_r` and :math:`x_p` the reactant- and product-side feature vectors, this
+featurizer emits :math:`(m, d)` with :math:`m = \tfrac12(x_r + x_p)` and
+:math:`d = x_p - x_r`, so that reversing a reaction is a sign flip on the trailing :math:`d`
+column block and leaves :math:`m` untouched.
 
 Every atom feature, including the element, gets both parts, so mapped atoms may change element.
 This admits alchemical transformations ``A>>B`` (e.g. phenol to toluene), with the atom map
@@ -30,12 +31,12 @@ import torch
 
 @dataclass
 class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
-    """Featurize reactions as a CGR in the ``(s, d)`` basis.
+    r"""Featurize reactions as a CGR in the :math:`(m, d)` basis.
 
     Parameters
     ----------
     balanced : bool, default=False
-        whether to use the ``*_BALANCE`` bond behaviour of the parent featurizer
+        whether to use the ``*_BALANCE`` bond behavior of the parent featurizer
         (``REAC_DIFF_BALANCE`` instead of ``REAC_DIFF``)
     mode_ : None
         not configurable; this featurizer defines its own layout. Passing a value raises
@@ -43,12 +44,13 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
 
     Notes
     -----
-    Node layout (``atom_fdim = 2F``): ``[0:F]`` even block ``s``, ``[F:2F]`` odd block ``d``.
-    Edge layout (``bond_fdim = 2B``): ``[0:B]`` even block ``s``, ``[B:2B]`` odd block ``d``.
+    Node layout (``atom_fdim = 2F``): ``[0:F]`` is the even block :math:`m`, ``[F:2F]`` the
+    odd block :math:`d`. Edge layout (``bond_fdim = 2B``): ``[0:B]`` is the even block
+    :math:`m`, ``[B:2B]`` the odd block :math:`d`.
 
     An atom absent from one side is a zero dummy atom there (``atom_featurizer(None)``), so a
-    vanishing atom has ``d = -x_r``. With ``balanced=True`` it is instead copied across
-    unchanged (``d = 0``), Chemprop's ``*_BALANCE`` meaning of an unrecorded spectator. Unlike
+    vanishing atom has :math:`d = -x_r`. With ``balanced=True`` it is instead copied across
+    unchanged (:math:`d = 0`), Chemprop's ``*_BALANCE`` meaning of an unrecorded spectator. Unlike
     Chemprop's ``REAC_DIFF``, the element is not written once: Chemprop assumes a mapped atom
     keeps its element, which this featurizer does not.
     """
@@ -62,19 +64,19 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
         if mode_ is not None:
             raise ValueError(
                 "ParityCGRFeaturizer defines its own feature layout and does not accept "
-                f"'mode_' (got {mode_!r}); use 'balanced' to select the balance behaviour."
+                f"'mode_' (got {mode_!r}); use 'balanced' to select the balance behavior."
             )
         super().__post_init__(RxnMode.REAC_DIFF_BALANCE if self.balanced else RxnMode.REAC_DIFF)
         self.atom_fdim = 2 * len(self.atom_featurizer)
 
     @property
     def odd_atom_start(self) -> int:
-        """First column of the odd (``d``) block of the node features."""
+        """First column of the odd (:math:`d`) block of the node features."""
         return len(self.atom_featurizer)
 
     @property
     def odd_bond_start(self) -> int:
-        """First column of the odd (``d``) block of the edge features."""
+        """First column of the odd (:math:`d`) block of the edge features."""
         return len(self.bond_featurizer)
 
     def _calc_node_feature_matrix(
@@ -116,11 +118,11 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
 
 
 def reverse_bmg(bmg: BatchMolGraph, odd_atom_start: int, odd_bond_start: int) -> BatchMolGraph:
-    """Reverse every reaction in a batch by negating the odd feature blocks.
+    r"""Reverse every reaction in a batch by negating the odd feature blocks.
 
-    In the ``(s, d)`` basis reversal is ``d -> -d`` with ``s`` unchanged, and the graph
-    topology is identical, so ``edge_index``, ``rev_edge_index`` and ``batch`` are shared
-    with the input. The input is not modified.
+    In the :math:`(m, d)` basis reversal is :math:`d \to -d` with :math:`m` unchanged, and the
+    graph topology is identical, so ``edge_index``, ``rev_edge_index`` and ``batch`` are
+    shared with the input. The input is not modified.
 
     Parameters
     ----------

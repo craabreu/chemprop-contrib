@@ -17,7 +17,7 @@ FREE = 0
 _VALID_PARITIES = (ODD, EVEN, FREE)
 
 # Exact types only: MveFFN, EvidentialFFN and QuantileFFN subclass RegressionFFN, and any other
-# subclass (e.g. SpectralFFN, whose output is a normalised positive spectrum) must be rejected
+# subclass (e.g. SpectralFFN, whose output is a normalized positive spectrum) must be rejected
 # rather than admitted silently.
 _ALLOWED_PREDICTORS = frozenset({RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN})
 
