@@ -111,12 +111,12 @@ class ParityEquivariantMPNN(MPNN):
                 "target_transform must be a ParityTargetTransform, got "
                 f"{type(target_transform).__name__}"
             )
+        mask = build_parity_mask(target_transform.task_parity, predictor)
         if not isinstance(predictor.output_transform, nn.Identity):
             raise ValueError(
                 "The predictor has an output_transform. Leave it out: the target transform "
                 "scales the targets, after the forward and reversed predictions are combined."
             )
-        mask = build_parity_mask(target_transform.task_parity, predictor)
         if target_transform.pairs and type(predictor) is not RegressionFFN:
             raise ValueError(
                 f"Paired columns need a RegressionFFN predictor, got {type(predictor).__name__}: "
@@ -154,7 +154,8 @@ class ParityEquivariantMPNN(MPNN):
         if not pairs or w.numel() != self.target_transform.n_tasks or w.numel() == 1:
             return
         extra = [float(w[0, p.forward]) if p.difference is not None else 1.0 for p in pairs]
-        metric.task_weights = torch.cat((w, torch.tensor([extra], dtype=w.dtype)), dim=1)
+        extra = torch.tensor([extra], dtype=w.dtype, device=w.device)
+        metric.task_weights = torch.cat((w, extra), dim=1)
 
     @property
     def task_parity(self) -> list[int]:
@@ -163,7 +164,11 @@ class ParityEquivariantMPNN(MPNN):
 
     @staticmethod
     def _as_start_index(name: str, value) -> int:
-        if isinstance(value, bool) or int(value) != value:
+        try:
+            integral = not isinstance(value, bool) and int(value) == value
+        except (TypeError, ValueError, OverflowError):  # None, "a", inf
+            integral = False
+        if not integral:
             raise ValueError(f"{name} must be an integer, got {value!r}")
         return int(value)
 
