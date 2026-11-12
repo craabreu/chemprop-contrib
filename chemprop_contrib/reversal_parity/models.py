@@ -30,6 +30,12 @@ class ParityEquivariantMPNN(MPNN):
     head and an odd head, and its loss also scores the pair's implied third member. Which
     columns are which is declared by ``target_transform``, which also scales the targets.
 
+    With an uncertainty predictor, the later components of each head (variance, evidential
+    parameters, interval width) are combined as even for an odd or even task and left free
+    for a free task. For a pair, those of the forward value are free and those of the reverse
+    value are the same outputs for :math:`\bar{x}`, so reversal swaps the two; those of the
+    difference are even. The three are not forced to be mutually consistent.
+
     Both passes share every weight, and are stacked on the batch dimension before batch norm
     so that in train mode they see identical batch statistics. The guarantee is exact
     whenever dropout is inactive, as in ``eval()``. With dropout active, the two passes get

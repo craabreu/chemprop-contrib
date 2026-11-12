@@ -74,6 +74,10 @@ class ParityTargetTransform(nn.Module):
     so both declarations train the same model on the same data. The model outputs only the
     columns of the dataset.
 
+    With an uncertainty predictor, each member of a pair has its own uncertainty components
+    :math:`u`: :math:`u_{\text{rev}}(x) = u_{\text{fwd}}(\bar{x})`, with :math:`u_{\text{fwd}}`
+    unconstrained, and :math:`u_{\text{diff}}` is even.
+
     The model works in the scaled target space and applies this transform after combining the
     forward and reversed predictions. In train mode it returns scaled predictions, which the
     loss compares with targets normalized by :meth:`to_standard_scaler`; in eval mode it also

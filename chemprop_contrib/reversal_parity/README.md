@@ -93,7 +93,20 @@ Training scores all three members of a pair. A row with both of its labels also 
 
 The same structure fits any property that reversal maps to its partner: rate constants ($\log k_{\text{f}}$ and $\log k_{\text{r}}$, whose difference is $\log K_{\text{eq}}$), free-energy barriers, or, for an alchemical pair `A>>B`, an endpoint property such as the solvation free energy of each end state. With $\Delta G_{\text{solv}}(B)$ as the forward column and $\Delta G_{\text{solv}}(A)$ as the reverse one, the difference is the relative $\Delta\Delta G_{\text{solv}}(A \to B)$ defined in [Alchemical transformations](#alchemical-transformations). The sign convention is $f_{\text{diff}} = f_{\text{fwd}} - f_{\text{rev}}$.
 
-Pairs need a plain `RegressionFFN`: uncertainty is not supported for them yet.
+### Uncertainty for pairs
+
+Pairs work with `MveFFN`, `EvidentialFFN` and `QuantileFFN`. Each member of a pair then has its own uncertainty outputs $u$ (a variance, the evidential parameters, or a quantile interval), and reversal treats them as it treats the members:
+
+$$u_{\text{rev}}(x) = u_{\text{fwd}}(\bar{x}), \qquad u_{\text{diff}}(\bar{x}) = u_{\text{diff}}(x).$$
+
+The forward and reverse uncertainties are one unconstrained output of the network, evaluated on the reaction and on its reverse. Reversal therefore swaps them exactly, and they are free to differ within a reaction, as they should: the two barriers of a reaction share a transition state but start from different minima. The uncertainty of the difference is combined as even, like that of any odd task. The predictions themselves are unchanged, so $f_{\text{fwd}} - f_{\text{rev}} = f_{\text{diff}}$ still holds exactly.
+
+Training scores all three members, each with its own uncertainty, but the model outputs only the columns of your dataset. With `paired_difference`, the uncertainty of the reverse value is the forward column's uncertainty for the reversed reaction.
+
+Two things are not guaranteed:
+
+- **The three uncertainties are learned separately.** Nothing forces them to be mutually consistent. For example, any joint distribution of the two barriers has $|\sigma_{\text{fwd}} - \sigma_{\text{rev}}| \le \sigma_{\text{diff}} \le \sigma_{\text{fwd}} + \sigma_{\text{rev}}$, and the three variances of `MveFFN` need not satisfy it.
+- **For `QuantileFFN`, the pair relation holds between interval midpoints.** Chemprop's `QuantileFFN` reports the midpoint of each interval as the prediction. The midpoint of the difference's interval equals the difference of the barriers' midpoints only if the predictive distributions are symmetric about their midpoints, which the model assumes.
 
 ## Alchemical transformations
 
@@ -138,8 +151,7 @@ On the side where an atom is absent it is a zero dummy atom: Chemprop's atom fea
 Construction raises `ValueError` for:
 
 - predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. The uncertainty outputs (variance, evidential parameters, quantile interval) of an odd or even task are combined as even, so they stay valid; those of a free task are free, like its prediction;
-- a predictor with its own `output_transform`, or a different number of tasks than the target transform;
-- pairs with `MveFFN`, `EvidentialFFN` or `QuantileFFN`: uncertainty is not supported for pairs yet.
+- a predictor with its own `output_transform`, or a different number of tasks than the target transform.
 
 `ParityTargetTransform` raises `ValueError` for indices out of range (floats and booleans are rejected, not truncated), a column given two roles (including a forward column in both `paired_reverse` and `paired_difference`), and a scaling that breaks the declaration (a nonzero mean on an odd or difference column, or different scalings for the two directions of a pair).
 
