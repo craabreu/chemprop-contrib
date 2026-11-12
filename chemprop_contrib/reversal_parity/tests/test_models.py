@@ -258,12 +258,6 @@ def test_rejects_target_that_is_not_a_parity_target_transform():
         )
 
 
-def test_rejects_paired_columns_with_an_uncertainty_predictor():
-    predictor = MveFFN(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
-    with pytest.raises(ValueError, match="Paired columns need a RegressionFFN"):
-        _model(predictor=predictor, target=ParityTargetTransform(2, paired_reverse={0: 1}))
-
-
 @torch.no_grad()
 def test_target_transform_unscales_after_the_combination():
     target = _target(mean=[0.0, 5.0, 7.0], scale=[2.0, 3.0, 4.0])
@@ -650,13 +644,40 @@ def test_pairs_are_exactly_consistent(spec, scaling):
 
 
 @torch.no_grad()
+@pytest.mark.parametrize("cls", [MveFFN, EvidentialFFN, QuantileFFN])
+def test_pair_uncertainties_follow_their_members_under_reversal(cls):
+    smis = [*parity_smis, CHAIN_SMI]
+    feat, bmg = _featurize(smis)
+    bmg = _as_double(bmg)
+    bmg_rev = _reverse(feat, bmg)
+    out = []
+    for spec, scaling in ((PAIR_D, SCALING_D), (PAIR_R, SCALING_R)):
+        torch.manual_seed(1)  # the same weights under both declarations
+        predictor = cls(n_tasks=3, input_dim=D_H, hidden_dim=D_H)
+        target = ParityTargetTransform(3, **spec, **scaling)
+        model = _model(feat, predictor, target).double().eval()
+        out.append((model(bmg), model(bmg_rev)))
+    (d, d_rev), (r, r_rev) = out
+
+    # reversal swaps forward and reverse, each with its own uncertainty
+    torch.testing.assert_close(r_rev[:, :2], r[:, [1, 0]], rtol=0, atol=1e-12)
+    assert (r[:, 0, 1:] - r[:, 1, 1:]).abs().min() > 1e-6  # the two are not tied
+    # the difference is odd and its uncertainty even
+    torch.testing.assert_close(d_rev[:, 1, 0], -d[:, 1, 0], rtol=0, atol=1e-12)
+    torch.testing.assert_close(d_rev[:, 1, 1:], d[:, 1, 1:], rtol=0, atol=1e-12)
+    # the forward column is the same under both declarations, as are their values
+    torch.testing.assert_close(d[:, 0], r[:, 0], rtol=0, atol=1e-12)
+    torch.testing.assert_close(d[:, 1, 0], r[:, 0, 0] - r[:, 1, 0], rtol=0, atol=1e-12)
+
+
+@torch.no_grad()
 def test_paired_training_and_eval_paths_agree():
     # the loss sees scaled predictions; unscaling them gives the eval-mode output
     feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     target = ParityTargetTransform(3, **PAIR_D, **SCALING_D)
     model = _model(feat, target=target).eval()
     model.on_validation_model_eval()  # eval, with the target transform in train mode
-    scaled = model._train_preds(bmg)
+    scaled = model._train_preds(bmg)[:, :3]  # the declared columns, before the implied member
     model.eval()
     torch.testing.assert_close(model(bmg), scaled * target.scale + target.mean, rtol=0, atol=1e-5)
 
@@ -681,9 +702,10 @@ def test_loss_scores_the_implied_member_where_both_labels_are_known():
     assert not lt_mask[:, 3].any() and not gt_mask[:, 3].any()
 
 
-def test_both_declarations_of_a_pair_train_alike(monkeypatch):
+@pytest.mark.parametrize("cls", [RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN])
+def test_both_declarations_of_a_pair_train_alike(cls, monkeypatch):
     # the same data given as (forward, difference) or as (forward, reverse) gives the same loss,
-    # since both score forward, reverse and difference
+    # since both score forward, reverse and difference, each with its own uncertainty
     feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     rng = np.random.default_rng(0)
     n = len(bmg)
@@ -692,10 +714,13 @@ def test_both_declarations_of_a_pair_train_alike(monkeypatch):
     losses = []
     for Y, spec in ((np.c_[ea, de, lam], PAIR_D), (np.c_[ea, ea - de, lam], PAIR_R)):
         target = ParityTargetTransform.fit(Y, **spec)
-        model = _model(feat, target=target).train()
+        torch.manual_seed(1)  # the same weights under both declarations
+        predictor = cls(n_tasks=3, input_dim=D_H, hidden_dim=D_H)
+        model = _model(feat, predictor, target).train()
         _record_logs(model, monkeypatch)
         Z = torch.tensor((Y - target.mean.double().numpy()) / target.scale.double().numpy())
         losses.append(model.training_step(_batch(bmg, targets=Z.float()), 0))
+    assert torch.isfinite(losses[0])
     torch.testing.assert_close(losses[0], losses[1], rtol=1e-5, atol=0)
 
 

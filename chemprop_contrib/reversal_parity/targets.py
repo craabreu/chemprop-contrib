@@ -304,24 +304,48 @@ class ParityTargetTransform(nn.Module):
             parity[p.forward], parity[p.second] = EVEN, ODD
         return parity
 
-    def forward(self, preds: Tensor, powers: Sequence[int] = ()) -> Tensor:
+    def _columns(self, heads: Tensor, reverse: Tensor | None) -> tuple[Tensor, Tensor | None]:
+        """The scaled declared columns, and the uncertainty components of each pair's implied
+        member (``None`` for 2-D ``heads``)."""
+        if not self.pairs:
+            return heads, None
+        if heads.ndim == 3 and reverse is None:
+            raise ValueError(
+                "Pairs with uncertainty components need the reversed pass: the forward column's "
+                "components there are the uncertainty of the pair's reverse value."
+            )
+        # heads: the forward column holds the scaled mean M, the other one the difference D
+        # in units of difference_scale. Scaled, forward = M + c D, reverse = M - c D.
+        fwd, sec, is_rev = self._fwd, self._sec, self._is_rev
+        # half the difference, in units of the forward column's scale
+        c = (self.difference_scale / (2 * self.scale[:, fwd])).to(heads.dtype)
+        cols = heads.clone()
+        value = cols if heads.ndim == 2 else cols[..., 0]  # a view of cols
+        M, D = value[:, fwd], value[:, sec]  # copies, as the indices are tensors
+        value[:, fwd] = M + c * D
+        value[:, sec] = torch.where(is_rev, M - c * D, D)
+        if heads.ndim == 2:
+            return cols, None
+        # The forward value keeps its own uncertainty components, which are free; those of the
+        # reverse value are the same outputs for the reversed input, and those of the
+        # difference are the even ones in the pair's other column.
+        u_rev, u_diff = reverse[:, fwd, 1:], heads[:, sec, 1:]
+        k = is_rev[:, None]
+        cols[:, sec, 1:] = torch.where(k, u_rev, u_diff)
+        return cols, torch.where(k, u_diff, u_rev)
+
+    def forward(
+        self, preds: Tensor, powers: Sequence[int] = (), reverse: Tensor | None = None
+    ) -> Tensor:
         """Map model heads to the declared columns, then (in eval mode) unscale.
 
         ``preds`` is ``(B, n_tasks)``, or ``(B, n_tasks, n_targets)`` for uncertainty
         predictors, whose component 0 is the prediction itself and component ``j > 0`` is
         multiplied by ``scale ** powers[j]`` on unscaling (2 for a variance, 1 for an interval
-        width, 0 for a dimensionless parameter). Pairs need ``(B, n_tasks)``.
+        width, 0 for a dimensionless parameter). Pairs with uncertainty components also need
+        ``reverse``, the predictor's output for the reversed inputs, in the same shape.
         """
-        if self.pairs:
-            # heads: the forward column holds the scaled mean M, the other one the difference
-            # D in units of difference_scale. Scaled, forward = M + c D, reverse = M - c D.
-            fwd, sec = self._fwd, self._sec
-            # half the difference, in units of the forward column's scale
-            c = (self.difference_scale / (2 * self.scale[:, fwd])).to(preds.dtype)
-            M, D = preds[:, fwd], preds[:, sec]
-            preds = preds.clone()
-            preds[:, fwd] = M + c * D
-            preds[:, sec] = torch.where(self._is_rev, M - c * D, D)
+        preds, _ = self._columns(preds, reverse)
         if self.training:
             return preds
         if preds.ndim == 2:
@@ -331,6 +355,20 @@ class ParityTargetTransform(nn.Module):
         for j in range(1, preds.shape[-1]):
             out[..., j] = preds[..., j] * self.scale ** powers[j]
         return out
+
+    def loss_columns(self, heads: Tensor, reverse: Tensor | None = None) -> Tensor:
+        """The scaled declared columns followed by each pair's implied member, as the loss
+        scores them: ``(B, n_tasks + n_pairs)``, with the components of ``heads`` if it is 3-D.
+
+        ``heads`` and ``reverse`` are as for :meth:`forward`.
+        """
+        cols, uncertainty = self._columns(heads, reverse)
+        if not self.pairs:
+            return cols
+        if uncertainty is None:
+            return torch.cat((cols, self.implied(cols)), dim=1)
+        member = torch.cat((self.implied(cols[..., 0]).unsqueeze(-1), uncertainty), dim=-1)
+        return torch.cat((cols, member), dim=1)
 
     def implied(self, Z: Tensor) -> Tensor:
         """The implied third member of each pair, ``(B, n_pairs)``, from scaled columns ``Z``.

@@ -272,6 +272,12 @@ def test_pairs_are_their_mean_plus_or_minus_half_the_difference():
     torch.testing.assert_close(out, t.train()(H) * t.scale + t.mean)
 
 
+def test_pairs_with_uncertainty_components_need_the_reversed_pass():
+    t = _pair_transform()
+    with pytest.raises(ValueError, match="reversed pass"):
+        t(torch.rand(7, 4, 2, dtype=torch.float64), (1, 2))
+
+
 def test_implied_member_of_targets():
     t = _pair_transform()
     Y = torch.tensor(

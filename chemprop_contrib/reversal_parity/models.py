@@ -8,7 +8,6 @@ from chemprop.data import BatchMolGraph
 from chemprop.models import MPNN
 from chemprop.models.model import BatchType
 from chemprop.nn import Aggregation, MessagePassing, Predictor
-from chemprop.nn.predictors import RegressionFFN
 import torch
 from torch import Tensor, nn
 
@@ -61,9 +60,7 @@ class ParityEquivariantMPNN(MPNN):
         if ``target_transform`` is not a :class:`ParityTargetTransform`.
     ValueError
         if the predictor is not one of the supported regression predictors, has an
-        ``output_transform``, or has a different number of tasks than ``target_transform``;
-        or if ``target_transform`` has paired columns and the predictor is not a plain
-        ``RegressionFFN``.
+        ``output_transform``, or has a different number of tasks than ``target_transform``.
 
     Notes
     -----
@@ -114,16 +111,15 @@ class ParityEquivariantMPNN(MPNN):
                 "target_transform must be a ParityTargetTransform, got "
                 f"{type(target_transform).__name__}"
             )
-        mask = build_parity_mask(target_transform.task_parity, predictor)
+        # the uncertainty outputs in a pair's forward column are free: the forward pass gives
+        # those of the forward value, the reversed pass those of the reverse value
+        mask = build_parity_mask(
+            target_transform.task_parity, predictor, [p.forward for p in target_transform.pairs]
+        )
         if not isinstance(predictor.output_transform, nn.Identity):
             raise ValueError(
                 "The predictor has an output_transform. Leave it out: the target transform "
                 "scales the targets, after the forward and reversed predictions are combined."
-            )
-        if target_transform.pairs and type(predictor) is not RegressionFFN:
-            raise ValueError(
-                f"Paired columns need a RegressionFFN predictor, got {type(predictor).__name__}: "
-                "uncertainty is not supported for them yet."
             )
 
         # The model owns a copy, in train mode like every freshly built module. The transform's
@@ -247,15 +243,16 @@ class ParityEquivariantMPNN(MPNN):
         self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
     ) -> Tensor:
         """Generate parity-equivariant predictions for the input reactions"""
-        preds = self._combine(self.predictor(self._paired_fingerprint(bmg, V_d, X_d)))
-        return self.target_transform(preds, self._powers)
+        both = self.predictor(self._paired_fingerprint(bmg, V_d, X_d))
+        return self.target_transform(self._combine(both), self._powers, both[len(both) // 2 :])
 
     def _train_preds(
         self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
     ) -> Tensor:
-        """Combined ``predictor.train_step`` output, as the training objective sees it."""
-        preds = self._combine(self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d)))
-        return self.target_transform(preds, self._powers)
+        """Combined ``predictor.train_step`` output, as the training objective sees it: the
+        scaled declared columns, followed by each pair's implied member."""
+        both = self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d))
+        return self.target_transform.loss_columns(self._combine(both), both[len(both) // 2 :])
 
     def on_validation_model_eval(self) -> None:
         # as chemprop does for the predictor's output transform: validation compares scaled
@@ -270,7 +267,6 @@ class ParityEquivariantMPNN(MPNN):
         preds = self._train_preds(bmg, V_d, X_d)
         tf = self.target_transform
         if tf.pairs:
-            preds = torch.cat((preds, tf.implied(preds)), dim=1)
             implied = tf.implied(targets)
             members = [[p.forward, p.second] for p in tf.pairs]
             for m in (lt_mask, gt_mask):
