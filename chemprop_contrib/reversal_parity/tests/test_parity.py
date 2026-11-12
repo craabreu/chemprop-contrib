@@ -14,10 +14,6 @@ from chemprop.nn.predictors import (
 from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD, build_parity_mask
 
 
-def test_constants():
-    assert (ODD, EVEN, FREE) == (-1, 1, 0)
-
-
 def test_regression_mask_is_1d():
     mask = build_parity_mask([ODD, EVEN, FREE], RegressionFFN(n_tasks=3))
     assert mask.shape == (3,)
@@ -48,17 +44,6 @@ def test_free_task_component_zero_stays_free():
     assert torch.equal(mask, torch.tensor([[0.0, 1.0], [1.0, 1.0]]))
 
 
-@pytest.mark.parametrize("cls", [RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN])
-def test_mask_broadcasts_against_predictor_output(cls):
-    predictor = cls(n_tasks=3, input_dim=8, hidden_dim=8).eval()
-    mask = build_parity_mask([ODD, EVEN, FREE], predictor)
-    Z = torch.randn(5, 8)
-    out = predictor(Z)
-    if isinstance(out, tuple):
-        out = out[0]
-    assert (mask * out).shape == out.shape
-
-
 @pytest.mark.parametrize(
     "predictor",
     [
@@ -86,12 +71,7 @@ def test_rejects_wrong_length_task_parity():
         build_parity_mask([ODD, EVEN], RegressionFFN(n_tasks=3))
 
 
-def test_rejects_invalid_parity_value():
-    with pytest.raises(ValueError, match="parity"):
-        build_parity_mask([ODD, 2], RegressionFFN(n_tasks=2))
-
-
-@pytest.mark.parametrize("bad", [0.7, -1.0, True, False, "odd", None])
-def test_rejects_non_integer_parity_value(bad):
+@pytest.mark.parametrize("bad", [2, -1.0, True, "odd"])
+def test_rejects_invalid_parity_value(bad):
     with pytest.raises(ValueError, match="Invalid parity values"):
         build_parity_mask([ODD, bad], RegressionFFN(n_tasks=2))

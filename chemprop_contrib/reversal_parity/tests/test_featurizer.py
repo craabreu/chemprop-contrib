@@ -4,7 +4,7 @@ import pytest
 
 from chemprop_contrib.reversal_parity.featurizers import ParityCGRFeaturizer
 
-from .conftest import alchemical_smis, make_rxn
+from .conftest import alchemical_smis, make_rxn, rxn_smis
 
 RING = "[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1"
 SINGLE = f"{RING}[OH:7]>>{RING}[CH3:7]"
@@ -26,31 +26,33 @@ def test_dimensions():
 
 
 @pytest.mark.parametrize("balanced", [False, True])
-def test_agrees_with_reac_diff_on_element_preserving_reactions(rxn_smi, balanced):
+def test_agrees_with_reac_diff_on_element_preserving_reactions(balanced):
     ours = ParityCGRFeaturizer(balanced=balanced)
     core = CondensedGraphOfReactionFeaturizer(
         mode_="REAC_DIFF_BALANCE" if balanced else "REAC_DIFF"
     )
-    mg_ours = ours(make_rxn(rxn_smi))
-    mg_core = core(make_rxn(rxn_smi))
-
     F, Bb = ours.odd_atom_start, ours.odd_bond_start
     k = len(ours.atom_featurizer.atomic_nums) + 1
-    s, d = mg_ours.V[:, :F], mg_ours.V[:, F:]
 
-    # non-element columns: core emits (x_r, d) and leaves the absent side zero, as we do
-    np.testing.assert_allclose(s[:, k:] - 0.5 * d[:, k:], mg_core.V[:, k:F], atol=1e-6)
-    np.testing.assert_allclose(d[:, k:], mg_core.V[:, F:], atol=1e-6)
-    # element block: core writes the present side's element once, i.e. max(x_r, x_p),
-    # which is s + |d|/2 in our basis (an absent side is zero here, not element-only)
-    np.testing.assert_allclose(s[:, :k] + 0.5 * np.abs(d[:, :k]), mg_core.V[:, :k], atol=1e-6)
+    for smi in rxn_smis:
+        mg_ours = ours(make_rxn(smi))
+        mg_core = core(make_rxn(smi))
+        m, d = mg_ours.V[:, :F], mg_ours.V[:, F:]
+        close = dict(atol=1e-6, err_msg=smi)
 
-    E = mg_ours.E.copy()
-    E[:, :Bb] -= 0.5 * E[:, Bb:]
-    np.testing.assert_allclose(E, mg_core.E, atol=1e-6)
+        # non-element columns: core emits (x_r, d) and leaves the absent side zero, as we do
+        np.testing.assert_allclose(m[:, k:] - 0.5 * d[:, k:], mg_core.V[:, k:F], **close)
+        np.testing.assert_allclose(d[:, k:], mg_core.V[:, F:], **close)
+        # element block: core writes the present side's element once, i.e. max(x_r, x_p),
+        # which is m + |d|/2 in our basis (an absent side is zero here, not element-only)
+        np.testing.assert_allclose(m[:, :k] + 0.5 * np.abs(d[:, :k]), mg_core.V[:, :k], **close)
 
-    np.testing.assert_array_equal(mg_ours.edge_index, mg_core.edge_index)
-    np.testing.assert_array_equal(mg_ours.rev_edge_index, mg_core.rev_edge_index)
+        E = mg_ours.E.copy()
+        E[:, :Bb] -= 0.5 * E[:, Bb:]
+        np.testing.assert_allclose(E, mg_core.E, **close)
+
+        np.testing.assert_array_equal(mg_ours.edge_index, mg_core.edge_index, err_msg=smi)
+        np.testing.assert_array_equal(mg_ours.rev_edge_index, mg_core.rev_edge_index, err_msg=smi)
 
 
 def _atom(mol, symbol):

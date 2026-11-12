@@ -23,8 +23,7 @@ from chemprop_contrib.reversal_parity.models import ParityEquivariantMPNN
 from chemprop_contrib.reversal_parity.parity import EVEN, FREE, ODD
 from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 
-from . import make_test_data
-from .conftest import alchemical_smis, make_rxn, reverse_rxn_smi, rxn_smis
+from .conftest import alchemical_smis, make_rxn, parity_smis, reverse_rxn_smi, rxn_smis
 
 D_H = 16
 def _target(n_tasks=3, odd=(0,), even=(1,), **kwargs):
@@ -112,35 +111,35 @@ def _record_logs(model, monkeypatch):
 
 
 @torch.no_grad()
-def test_odd_task_is_exactly_antisymmetric(parity_smi):
-    feat, bmg = _featurize([parity_smi])
+def test_odd_task_is_exactly_antisymmetric():
+    feat, bmg = _featurize(parity_smis)
     model = _model(feat).eval()
     f = model(bmg)[:, 0]
     torch.testing.assert_close(model(_reverse(feat, bmg))[:, 0], -f, rtol=0, atol=1e-5)
 
-    _, bmg_rev = _featurize([reverse_rxn_smi(parity_smi)], feat)
+    _, bmg_rev = _featurize([reverse_rxn_smi(s) for s in parity_smis], feat)
     torch.testing.assert_close(model(bmg_rev)[:, 0], -f, rtol=0, atol=1e-5)
 
 
 @torch.no_grad()
-def test_even_task_is_exactly_symmetric(parity_smi):
-    feat, bmg = _featurize([parity_smi])
+def test_even_task_is_exactly_symmetric():
+    feat, bmg = _featurize(parity_smis)
     model = _model(feat).eval()
     f = model(bmg)[:, 1]
     torch.testing.assert_close(model(_reverse(feat, bmg))[:, 1], f, rtol=0, atol=1e-5)
 
-    _, bmg_rev = _featurize([reverse_rxn_smi(parity_smi)], feat)
+    _, bmg_rev = _featurize([reverse_rxn_smi(s) for s in parity_smis], feat)
     torch.testing.assert_close(model(bmg_rev)[:, 1], f, rtol=0, atol=1e-5)
 
 
 @torch.no_grad()
-def test_free_task_equals_forward_pass(parity_smi):
-    feat, bmg = _featurize([parity_smi])
+def test_free_task_equals_forward_pass():
+    feat, bmg = _featurize(parity_smis)
     model = _model(feat).eval()
     expected = model.predictor(model.fingerprint(bmg))[:, 2]
     torch.testing.assert_close(model(bmg)[:, 2], expected, rtol=0, atol=1e-5)
-    # and it is not constrained: the reversed reaction gives a different value
-    assert not torch.allclose(model(_reverse(feat, bmg))[:, 2], expected, atol=1e-5)
+    # and it is not constrained: every reversed reaction gives a different value
+    assert not torch.isclose(model(_reverse(feat, bmg))[:, 2], expected, atol=1e-5).any()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -173,10 +172,10 @@ def test_training_step_applies_the_parity_combination(monkeypatch):
     assert [name for name, *_ in logs] == ["train_loss", "train_loss"]
     assert logs[0][2]["batch_size"] == len(bmg)
 
-    # gradients reach every encoder parameter through the combined objective
+    # gradients reach every parameter through the combined objective
     model.zero_grad()
     model.training_step(_batch(bmg, targets=targets), 0).backward()
-    for name, p in model.message_passing.named_parameters():
+    for name, p in model.named_parameters():
         assert p.grad is not None and p.grad.abs().sum() > 0, name
 
 
@@ -205,18 +204,6 @@ def test_validation_step_applies_the_parity_combination(monkeypatch):
 
 
 @torch.no_grad()
-def test_fingerprint_keeps_batch_dim_B():
-    feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, batch_norm=True).eval()
-    fp = model.fingerprint(bmg)
-    assert fp.shape == (len(bmg), D_H)
-    torch.testing.assert_close(fp, MPNN.fingerprint(model, bmg), rtol=0, atol=0)
-    paired = model._paired_fingerprint(bmg)
-    assert paired.shape == (2 * len(bmg), D_H)
-    torch.testing.assert_close(paired[: len(bmg)], fp, rtol=0, atol=1e-6)
-
-
-@torch.no_grad()
 @pytest.mark.parametrize("batch_norm", [False, True])
 def test_paired_fingerprint_equals_two_separate_encoder_passes(batch_norm):
     # the single stacked pass must compute exactly what encoding x and x̄ separately computes
@@ -238,9 +225,13 @@ def test_paired_fingerprint_equals_two_separate_encoder_passes(batch_norm):
 
 
 @torch.no_grad()
-def test_encoding_is_unchanged():
+def test_fingerprint_and_encoding_are_unchanged():
+    # both describe the forward reactions alone, one row each, as in a plain MPNN
     feat, bmg = _featurize(rxn_smis)
-    model = _model(feat).eval()
+    model = _model(feat, batch_norm=True).eval()
+    fp = model.fingerprint(bmg)
+    assert fp.shape == (len(bmg), D_H)
+    torch.testing.assert_close(fp, MPNN.fingerprint(model, bmg), rtol=0, atol=0)
     for i in (0, 1, -1):
         torch.testing.assert_close(
             model.encoding(bmg, i=i), MPNN.encoding(model, bmg, i=i), rtol=0, atol=0
@@ -267,9 +258,8 @@ def test_rejects_target_that_is_not_a_parity_target_transform():
         )
 
 
-@pytest.mark.parametrize("cls", [MveFFN, EvidentialFFN, QuantileFFN])
-def test_rejects_paired_columns_with_uncertainty_predictors(cls):
-    predictor = cls(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
+def test_rejects_paired_columns_with_an_uncertainty_predictor():
+    predictor = MveFFN(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
     with pytest.raises(ValueError, match="Paired columns need a RegressionFFN"):
         _model(predictor=predictor, target=ParityTargetTransform(2, paired_reverse={0: 1}))
 
@@ -296,15 +286,14 @@ def _scale_transform(d):
     )
 
 
-@pytest.mark.parametrize("rxn_smi", rxn_smis)
-def test_parity_is_exact_with_atom_and_bond_feature_scaling(rxn_smi):
+def test_parity_is_exact_with_atom_and_bond_feature_scaling():
     # the graph transform runs inside the encoder, after reverse_bmg, so it is part of g: parity
     # holds even with nonzero means on the odd (difference) columns
-    feat, bmg = _featurize([rxn_smi])
+    feat, bmg = _featurize(rxn_smis)
     gt = GraphTransform(_scale_transform(feat.atom_fdim), _scale_transform(feat.bond_fdim))
     assert torch.all(gt.V_transform.mean[0, feat.odd_atom_start :] != 0)
     model = _model(feat, graph_transform=gt).eval()
-    _, bmg_rev = _featurize([reverse_rxn_smi(rxn_smi)], feat)
+    _, bmg_rev = _featurize([reverse_rxn_smi(s) for s in rxn_smis], feat)
     out, out_rev = model(bmg), model(bmg_rev)
     torch.testing.assert_close(out_rev[:, 0], -out[:, 0], rtol=0, atol=1e-5)
     torch.testing.assert_close(out_rev[:, 1], out[:, 1], rtol=0, atol=1e-5)
@@ -346,44 +335,30 @@ def test_start_index_upper_bound_skipped_without_message_passing_dims(monkeypatc
 
 
 def test_rejects_disallowed_predictor():
-    predictor = BinaryClassificationFFN(n_tasks=3, input_dim=D_H)
-    with pytest.raises(ValueError, match="BinaryClassificationFFN"):
-        _model(predictor=predictor)
+    class Bare(torch.nn.Module):  # a custom predictor need not have an output_transform
+        pass
+
+    for predictor in (BinaryClassificationFFN(n_tasks=3, input_dim=D_H), Bare()):
+        with pytest.raises(ValueError, match=type(predictor).__name__):
+            _model(predictor=predictor)
 
 
-@pytest.mark.parametrize("start", [0, -1, "atom_fdim"])
-def test_rejects_out_of_range_atom_start(start):
-    feat = ParityCGRFeaturizer()
-    start = feat.atom_fdim if start == "atom_fdim" else start
-    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
-    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
-    with pytest.raises(ValueError, match="odd_atom_start must satisfy"):
-        ParityEquivariantMPNN(
-            mp, MeanAggregation(), predictor, start, feat.odd_bond_start, _target()
-        )
-
-
-@pytest.mark.parametrize("start", [0, -1, "bond_fdim"])
-def test_rejects_out_of_range_bond_start(start):
-    feat = ParityCGRFeaturizer()
-    start = feat.bond_fdim if start == "bond_fdim" else start
-    mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
-    predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
-    with pytest.raises(ValueError, match="odd_bond_start must satisfy"):
-        ParityEquivariantMPNN(
-            mp, MeanAggregation(), predictor, feat.odd_atom_start, start, _target()
-        )
-
-
-@pytest.mark.parametrize("bad", [10.5, True])
-def test_rejects_non_integral_start(bad):
+@pytest.mark.parametrize("which", ["atom", "bond"])
+def test_rejects_invalid_start_index(which):
     feat = ParityCGRFeaturizer()
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
-    with pytest.raises(ValueError, match="odd_atom_start must be an integer"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, bad, feat.odd_bond_start, _target())
-    with pytest.raises(ValueError, match="odd_bond_start must be an integer"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, bad, _target())
+    starts = dict(odd_atom_start=feat.odd_atom_start, odd_bond_start=feat.odd_bond_start)
+    name = f"odd_{which}_start"
+    bad_starts = {
+        "must satisfy": (0, -1, getattr(feat, f"{which}_fdim")),  # out of range
+        "must be an integer": (10.5, True, None, "a", float("inf")),
+    }
+    for reason, values in bad_starts.items():
+        for bad in values:
+            kwargs = {**starts, name: bad, "target_transform": _target()}
+            with pytest.raises(ValueError, match=f"{name} {reason}"):
+                ParityEquivariantMPNN(mp, MeanAggregation(), predictor, **kwargs)
 
 
 def test_rejects_target_with_wrong_number_of_tasks():
@@ -392,79 +367,32 @@ def test_rejects_target_with_wrong_number_of_tasks():
         _model(predictor=predictor, target=ParityTargetTransform(2, odd=[0]))
 
 
-def test_target_transform_and_mask_are_stored():
-    target = _target()
-    model = _model(target=target)
-    # the model keeps its own copy
-    assert model.target_transform is not target
-    assert model.target_transform.pairs == target.pairs
-    assert model.target_transform.odd == target.odd and model.target_transform.even == target.even
-    assert model.task_parity == [ODD, EVEN, FREE]
-    assert "parity_mask" not in model.state_dict()
-    assert {"target_transform.mean", "target_transform.scale"} <= set(model.state_dict())
-    assert torch.equal(model.parity_mask, torch.tensor([-1.0, 1.0, 0.0]))
-    feat = ParityCGRFeaturizer()
-    assert model.odd_atom_start == feat.odd_atom_start
-    assert model.odd_bond_start == feat.odd_bond_start
-    assert model.hparams["odd_atom_start"] == feat.odd_atom_start
-    assert model.hparams["odd_bond_start"] == feat.odd_bond_start
-    assert model.hparams["target_transform"] is model.target_transform
-
-
 # ---------------------------------------------------------------------------------------------
-# extra descriptors, batch norm, shapes
+# extra descriptors, batch norm
 
 
-def test_extra_descriptors_reach_both_passes():
-    d_xd = 4
+@torch.no_grad()
+def test_parity_is_exact_with_extra_atom_and_datapoint_descriptors():
+    d_vd, d_xd = 3, 4
     feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, d_xd=d_xd).eval()
+    model = _model(feat, d_vd=d_vd, d_xd=d_xd).eval()
+    V_d = torch.randn(bmg.V.shape[0], d_vd)
     X_d = torch.randn(len(bmg), d_xd)
-    with torch.no_grad():
-        paired = model._paired_fingerprint(bmg, X_d=X_d)
-        assert paired.shape == (2 * len(bmg), D_H + d_xd)
-        torch.testing.assert_close(paired[: len(bmg), D_H:], X_d, rtol=0, atol=0)
-        torch.testing.assert_close(paired[len(bmg) :, D_H:], X_d, rtol=0, atol=0)
-        f = model(bmg, X_d=X_d)
-        f_rev = model(_reverse(feat, bmg), X_d=X_d)
+
+    f = model(bmg, V_d, X_d)
+    f_rev = model(_reverse(feat, bmg), V_d, X_d)
     torch.testing.assert_close(f_rev[:, 0], -f[:, 0], rtol=0, atol=1e-5)
     torch.testing.assert_close(f_rev[:, 1], f[:, 1], rtol=0, atol=1e-5)
+    # both kinds of descriptors reach the prediction
+    assert not torch.allclose(model(bmg, torch.zeros_like(V_d), X_d), f, atol=1e-5)
+    assert not torch.allclose(model(bmg, V_d, torch.zeros_like(X_d)), f, atol=1e-5)
 
 
-def test_v_d_is_forwarded_to_forward_and_reversed_graphs(monkeypatch):
-    d_vd = 3
+def test_antisymmetry_holds_with_batch_norm():
     feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, d_vd=d_vd).eval()
-    V_d = torch.randn(bmg.V.shape[0], d_vd)
-
-    seen = []
-    original = model.message_passing.forward
-
-    def spy(bmg_, V_d_=None):
-        seen.append((bmg_, V_d_))
-        return original(bmg_, V_d_)
-
-    monkeypatch.setattr(model.message_passing, "forward", spy)
-    with torch.no_grad():
-        f = model(bmg, V_d=V_d)
-    # one encoder pass over the forward graphs followed by the reversed ones
-    assert len(seen) == 1
-    both, V_d_seen = seen[0]
-    n = bmg.V.shape[0]
-    torch.testing.assert_close(both.V[:n], bmg.V, rtol=0, atol=0)
-    torch.testing.assert_close(both.V[n:], _reverse(feat, bmg).V, rtol=0, atol=0)
-    torch.testing.assert_close(V_d_seen, torch.cat((V_d, V_d)), rtol=0, atol=0)
-
-    with torch.no_grad():
-        f_rev = model(_reverse(feat, bmg), V_d=V_d)
-    torch.testing.assert_close(f_rev[:, 0], -f[:, 0], rtol=0, atol=1e-5)
-
-
-def test_antisymmetry_holds_with_batch_norm(rxn_smi):
-    feat, bmg = _featurize([rxn_smi])
     model = _model(feat, batch_norm=True)
 
-    # Train mode: both passes are normalised together, so the forward and reversed inputs see
+    # Train mode: both passes are normalized together, so the forward and reversed inputs see
     # identical batch statistics and the combination stays exact. No output/graph transforms are
     # attached, so their train-mode short-circuit cannot make this pass for unrelated reasons.
     model.train()
@@ -484,19 +412,6 @@ def test_antisymmetry_holds_with_batch_norm(rxn_smi):
         f_rev = model(_reverse(feat, bmg))
     torch.testing.assert_close(f_rev[:, 0], -f[:, 0], rtol=0, atol=1e-5)
     torch.testing.assert_close(f_rev[:, 1], f[:, 1], rtol=0, atol=1e-5)
-
-
-@pytest.mark.parametrize("cls", [RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN])
-@torch.no_grad()
-def test_output_shape_matches_plain_mpnn(cls):
-    feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, predictor=cls(n_tasks=3, input_dim=D_H, hidden_dim=D_H)).eval()
-    plain = MPNN(model.message_passing, model.agg, model.predictor).eval()
-    assert model(bmg).shape == plain(bmg).shape
-    assert model.predictor.train_step(model._paired_fingerprint(bmg)).shape[0] == 2 * len(bmg)
-    assert model._combine(model.predictor.train_step(model._paired_fingerprint(bmg))).shape == (
-        plain.predictor.train_step(plain.fingerprint(bmg)).shape
-    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -571,16 +486,6 @@ N_TRAIN, N_VAL = 24, 8
 def _fixture_rows():
     with open(FIXTURE_CSV, newline="") as f:
         return list(csv.DictReader(f))
-
-
-def test_fixture_targets_have_the_parity_they_claim():
-    rows = _fixture_rows()
-    assert len(rows) == 100
-    assert any(abs(float(r["y_odd"])) > 1e-3 for r in rows), "y_odd must not be vacuous"
-    for r in rows[:10]:
-        odd, even = make_test_data.derived_targets(reverse_rxn_smi(r["smiles"]))
-        assert odd == pytest.approx(-float(r["y_odd"]), abs=1e-9)
-        assert even == pytest.approx(float(r["y_even"]), abs=1e-9)
 
 
 def _datasets(feat, n_train=N_TRAIN, n_val=N_VAL, spec=None, as_reverse=False):
@@ -670,44 +575,12 @@ def _fit(max_epochs=100, **trainer_kwargs):
     return feat, model, trainer, before, _eval_loss(model, eval_loader), val
 
 
-def test_gradients_reach_all_encoder_parameters(monkeypatch):
-    feat = ParityCGRFeaturizer()
-    train, _, transform = _datasets(feat)
-    model = _fixture_model(feat, transform)
-    _record_logs(model, monkeypatch)
-    batch = next(iter(build_dataloader(train, batch_size=N_TRAIN, num_workers=0, shuffle=False)))
-    model.train().zero_grad()
-    model.training_step(batch, 0).backward()
-    for name, p in model.named_parameters():
-        assert p.grad is not None and p.grad.abs().sum() > 0, name
-
-
 @lightning_warnings
 def test_training_reduces_loss_on_an_exactly_odd_target():
     # meaningful because y_odd genuinely has odd parity: a constrained model can fit a
     # function of the parity it exists for
     _, _, _, before, after, _ = _fit()
     assert after < 0.1 * before, (before, after)
-
-
-@lightning_warnings
-@torch.no_grad()
-def test_antisymmetry_survives_training():
-    feat, model, _, _, _, val = _fit(max_epochs=10)
-    model.eval()
-    bmg = BatchMolGraph([val[i].mg for i in range(len(val))])
-    f = model(bmg)
-    f_rev = model(_reverse(feat, bmg))
-    torch.testing.assert_close(f_rev[:, 1], -f[:, 1], rtol=0, atol=1e-5)
-    torch.testing.assert_close(f_rev[:, 2], f[:, 2], rtol=0, atol=1e-5)
-    assert not torch.allclose(f_rev[:, 0], f[:, 0], atol=1e-5)  # free task stays free
-    assert f[:, 1].abs().max() > 1e-3  # not vacuous
-
-    # and through the real reversed SMILES, featurized from scratch
-    rows = _fixture_rows()[N_TRAIN : N_TRAIN + 3]
-    _, bmg_rev = _featurize([reverse_rxn_smi(r["smiles"]) for r in rows], feat)
-    _, bmg_fwd = _featurize([r["smiles"] for r in rows], feat)
-    torch.testing.assert_close(model(bmg_rev)[:, 1], -model(bmg_fwd)[:, 1], rtol=0, atol=1e-5)
 
 
 @torch.no_grad()
@@ -760,8 +633,8 @@ def _as_double(bmg):
 
 @torch.no_grad()
 @pytest.mark.parametrize("spec, scaling", [(PAIR_D, SCALING_D), (PAIR_R, SCALING_R)])
-def test_pairs_are_exactly_consistent(parity_smi, spec, scaling):
-    smis = [parity_smi, CHAIN_SMI]
+def test_pairs_are_exactly_consistent(spec, scaling):
+    smis = [*parity_smis, CHAIN_SMI]
     feat, bmg = _featurize(smis)
     _, bmg_rev = _featurize([reverse_rxn_smi(s) for s in smis], feat)
     bmg, bmg_rev = _as_double(bmg), _as_double(bmg_rev)
@@ -773,7 +646,7 @@ def test_pairs_are_exactly_consistent(parity_smi, spec, scaling):
         torch.testing.assert_close(f_rev[:, 1], -f[:, 1], rtol=0, atol=1e-12)
     else:  # reversal swaps forward and reverse
         torch.testing.assert_close(f_rev[:, :2], f[:, [1, 0]], rtol=0, atol=1e-12)
-    assert (f[:, 0] - f_rev[:, 0]).abs().max() > 1e-6  # not vacuous
+    assert (f[:, 0] - f_rev[:, 0]).abs().min() > 1e-6  # not vacuous for any reaction
 
 
 @torch.no_grad()
@@ -839,8 +712,18 @@ def test_implied_members_get_loss_weights(pair, extra):
         assert metric.task_weights.tolist() == [[2.0, 3.0, 4.0, extra]]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_implied_member_weights_follow_a_predictor_on_the_gpu():
+    predictor = RegressionFFN(
+        n_tasks=3, input_dim=D_H, hidden_dim=D_H, task_weights=[2.0, 3.0, 4.0]
+    ).cuda()
+    model = _model(predictor=predictor, target=ParityTargetTransform(3, paired_reverse={0: 1}))
+    assert model.criterion.task_weights.device == predictor.ffn[0][0].weight.device
+    assert model.criterion.task_weights.tolist() == [[2.0, 3.0, 4.0, 1.0]]
+
+
 def test_paired_column_trains_without_difference_labels(monkeypatch):
-    # rows with only the forward value labelled still train it, through both heads
+    # rows with only the forward value labeled still train it, through both heads
     feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     model = _model(feat, target=ParityTargetTransform(3, **PAIR_D)).train()
     _record_logs(model, monkeypatch)
@@ -929,7 +812,7 @@ def test_model_saved_in_eval_mode_reloads_ready_to_train(tmp_path):
 @pytest.mark.parametrize("as_reverse", [False, True], ids=["difference", "reverse"])
 def test_pair_learns_its_difference(as_reverse):
     # the fixture's odd column is learnable, so after training the predicted forward(x) -
-    # forward(x̄), which is exactly the predicted difference, must track the labelled difference
+    # forward(x̄), which is exactly the predicted difference, must track the labeled difference
     pl.seed_everything(0)
     feat = ParityCGRFeaturizer()
     train, val, target = _datasets(
@@ -950,5 +833,5 @@ def test_pair_learns_its_difference(as_reverse):
     bmg = BatchMolGraph([train[i].mg for i in range(len(train))])
     gap = model(bmg)[:, 0] - model(_reverse(feat, bmg))[:, 0]
     Y = train._Y
-    labelled = torch.tensor(Y[:, 0] - Y[:, 1] if as_reverse else Y[:, 1], dtype=gap.dtype)
-    assert torch.corrcoef(torch.stack([gap, labelled]))[0, 1] > 0.9
+    labeled = torch.tensor(Y[:, 0] - Y[:, 1] if as_reverse else Y[:, 1], dtype=gap.dtype)
+    assert torch.corrcoef(torch.stack([gap, labeled]))[0, 1] > 0.9

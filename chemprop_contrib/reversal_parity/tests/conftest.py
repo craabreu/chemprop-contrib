@@ -6,7 +6,6 @@ from chemprop.data.collate import BatchMolGraph
 from chemprop.data.molgraph import MolGraph
 from chemprop.nn import BondMessagePassing, MeanAggregation
 from chemprop.utils import make_mol
-import pytest
 from rdkit import Chem
 import torch
 from torch import Tensor
@@ -40,15 +39,8 @@ alchemical_smis = [
 ]
 
 
-@pytest.fixture(params=rxn_smis)
-def rxn_smi(request) -> str:
-    return request.param
-
-
-@pytest.fixture(params=rxn_smis + alchemical_smis)
-def parity_smi(request) -> str:
-    """Every input the parity guarantee must hold for: reactions and alchemical pairs."""
-    return request.param
+# every input the parity guarantee must hold for: reactions and alchemical pairs
+parity_smis = rxn_smis + alchemical_smis
 
 
 def make_rxn(smi: str) -> tuple[Chem.Mol, Chem.Mol]:

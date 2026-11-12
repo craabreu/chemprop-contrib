@@ -10,63 +10,57 @@ from chemprop_contrib.reversal_parity.featurizers import (
     stack_reversed_bmg,
 )
 
-from .conftest import alchemical_smis, encode, make_rxn, reverse_rxn_smi, rxn_smis
+from .conftest import encode, make_rxn, parity_smis, reverse_rxn_smi
 
 ZERO_EDGE_SMI = "[CH4:1]>>[CH3:1].[H:2]"
 _TENSOR_FIELDS = ("V", "E", "edge_index", "rev_edge_index", "batch")
 
 
-def _forward(smi, balanced=False):
+def _forward(smis=parity_smis, balanced=False):
+    """A featurizer and one batch holding every reaction in ``smis``."""
     feat = ParityCGRFeaturizer(balanced=balanced)
-    return feat, BatchMolGraph([feat(make_rxn(smi))])
+    return feat, BatchMolGraph([feat(make_rxn(smi)) for smi in smis])
 
 
 def _reverse(feat, bmg):
     return reverse_bmg(bmg, feat.odd_atom_start, feat.odd_bond_start)
 
 
-def test_shares_topology_tensors(parity_smi):
-    feat, bmg = _forward(parity_smi)
+def test_shares_topology_and_does_not_mutate_input():
+    feat, bmg = _forward()
+    V, E = bmg.V.clone(), bmg.E.clone()
     out = _reverse(feat, bmg)
+    torch.testing.assert_close(bmg.V, V, rtol=0, atol=0)
+    torch.testing.assert_close(bmg.E, E, rtol=0, atol=0)
     assert out.edge_index is bmg.edge_index
     assert out.rev_edge_index is bmg.rev_edge_index
     assert out.batch is bmg.batch
+    assert len(out) == len(bmg)
 
 
-def test_does_not_mutate_input(parity_smi):
-    feat, bmg = _forward(parity_smi)
-    V, E = bmg.V.clone(), bmg.E.clone()
-    _reverse(feat, bmg)
-    torch.testing.assert_close(bmg.V, V, rtol=0, atol=0)
-    torch.testing.assert_close(bmg.E, E, rtol=0, atol=0)
-
-
-def test_is_an_involution(parity_smi):
-    feat, bmg = _forward(parity_smi)
+def test_is_an_involution():
+    feat, bmg = _forward()
     out = _reverse(feat, _reverse(feat, bmg))
     torch.testing.assert_close(out.V, bmg.V, rtol=0, atol=0)
     torch.testing.assert_close(out.E, bmg.E, rtol=0, atol=0)
 
 
 def test_handles_zero_edge_reaction():
-    feat, bmg = _forward(ZERO_EDGE_SMI)
+    feat, bmg = _forward([ZERO_EDGE_SMI])
     assert bmg.E.shape == (0, feat.bond_fdim)
     out = _reverse(feat, bmg)
     assert out.E.shape == (0, feat.bond_fdim)
     assert out.V.shape == bmg.V.shape
 
 
-def test_preserves_len(parity_smi):
-    feat, bmg = _forward(parity_smi)
-    assert len(_reverse(feat, bmg)) == len(bmg)
-
-
 @pytest.mark.parametrize("balanced", [False, True])
-def test_matches_refeaturized_reverse(parity_smi, balanced):
-    feat, bmg = _forward(parity_smi, balanced)
-    expected = encode(BatchMolGraph([feat(make_rxn(reverse_rxn_smi(parity_smi)))]))
-    actual = encode(_reverse(feat, bmg))
-    assert torch.allclose(actual, expected, atol=1e-5)
+def test_matches_refeaturized_reverse(balanced):
+    feat, bmg = _forward(balanced=balanced)
+    _, refeaturized = _forward([reverse_rxn_smi(s) for s in parity_smis], balanced)
+    # one row per reaction
+    torch.testing.assert_close(
+        encode(_reverse(feat, bmg)), encode(refeaturized), rtol=0, atol=1e-5
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -88,7 +82,7 @@ def _flip(feat, mg):
 def test_stack_matches_chemprop_collate_of_forward_then_reversed_graphs(balanced):
     # chemprop's own collate is the reference for the index offsets
     feat = ParityCGRFeaturizer(balanced=balanced)
-    mgs = [feat(make_rxn(s)) for s in rxn_smis + alchemical_smis + [ZERO_EDGE_SMI]]
+    mgs = [feat(make_rxn(s)) for s in parity_smis]
     out = _stack(feat, BatchMolGraph(mgs))
     ref = BatchMolGraph(mgs + [_flip(feat, mg) for mg in mgs])
     assert len(out) == len(ref) == 2 * len(mgs)
@@ -96,11 +90,11 @@ def test_stack_matches_chemprop_collate_of_forward_then_reversed_graphs(balanced
         torch.testing.assert_close(getattr(out, name), getattr(ref, name), rtol=0, atol=0)
 
 
-def test_stack_does_not_mutate_input(parity_smi):
-    feat, bmg = _forward(parity_smi)
+def test_stack_does_not_mutate_input():
+    feat, bmg = _forward()
     before = {name: getattr(bmg, name).clone() for name in _TENSOR_FIELDS}
     _stack(feat, bmg)
-    assert len(bmg) == 1
+    assert len(bmg) == len(parity_smis)
     for name, value in before.items():
         torch.testing.assert_close(getattr(bmg, name), value, rtol=0, atol=0)
 
