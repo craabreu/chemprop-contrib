@@ -180,6 +180,14 @@ class ParityTargetTransform(nn.Module):
         self.register_buffer("mean", torch.tensor(mean, dtype=torch.float).unsqueeze(0))
         self.register_buffer("scale", torch.tensor(scale, dtype=torch.float).unsqueeze(0))
         self.register_buffer("difference_scale", torch.tensor(dscale, dtype=torch.float)[None])
+        # The pairs' columns, as index tensors that follow the module's device. They restate
+        # the declaration, so they stay out of the state dict.
+        for name, values, dtype in (
+            ("_fwd", [p.forward for p in paired], torch.long),
+            ("_sec", [p.second for p in paired], torch.long),
+            ("_is_rev", [p.reverse is not None for p in paired], torch.bool),
+        ):
+            self.register_buffer(name, torch.tensor(values, dtype=dtype), persistent=False)
 
     @staticmethod
     def _parse_pairs(paired_difference, paired_reverse, n_tasks: int) -> list[_Pair]:
@@ -294,14 +302,6 @@ class ParityTargetTransform(nn.Module):
             parity[p.forward], parity[p.second] = EVEN, ODD
         return parity
 
-    def _pair_tensors(self, like: Tensor) -> tuple[list[int], list[int], Tensor, Tensor]:
-        fwd = [p.forward for p in self.pairs]
-        sec = [p.second for p in self.pairs]
-        is_rev = torch.tensor([p.reverse is not None for p in self.pairs], device=like.device)
-        # half the difference, in units of the forward column's scale
-        c = self.difference_scale / (2 * self.scale[:, fwd])
-        return fwd, sec, is_rev, c.to(like.dtype)
-
     def forward(self, preds: Tensor, powers: Sequence[int] = ()) -> Tensor:
         """Map model heads to the declared columns, then (in eval mode) unscale.
 
@@ -311,13 +311,15 @@ class ParityTargetTransform(nn.Module):
         width, 0 for a dimensionless parameter). Pairs need ``(B, n_tasks)``.
         """
         if self.pairs:
-            # heads: the forward column holds the scaled mean B, the other one the difference
-            # D in units of difference_scale. Scaled, forward = B + c D, reverse = B - c D.
-            fwd, sec, is_rev, c = self._pair_tensors(preds)
-            B, D = preds[:, fwd], preds[:, sec]
+            # heads: the forward column holds the scaled mean M, the other one the difference
+            # D in units of difference_scale. Scaled, forward = M + c D, reverse = M - c D.
+            fwd, sec = self._fwd, self._sec
+            # half the difference, in units of the forward column's scale
+            c = (self.difference_scale / (2 * self.scale[:, fwd])).to(preds.dtype)
+            M, D = preds[:, fwd], preds[:, sec]
             preds = preds.clone()
-            preds[:, fwd] = B + c * D
-            preds[:, sec] = torch.where(is_rev, B - c * D, D)
+            preds[:, fwd] = M + c * D
+            preds[:, sec] = torch.where(self._is_rev, M - c * D, D)
         if self.training:
             return preds
         if preds.ndim == 2:
@@ -337,7 +339,7 @@ class ParityTargetTransform(nn.Module):
         ``paired_difference``; it is returned scaled like that member (so a missing label gives
         NaN).
         """
-        fwd, sec, is_rev, _ = self._pair_tensors(Z)
+        fwd, sec, is_rev = self._fwd, self._sec, self._is_rev
         mean, scale = self.mean.to(Z.dtype), self.scale.to(Z.dtype)
         F = Z[:, fwd] * scale[:, fwd] + mean[:, fwd]
         S = Z[:, sec] * scale[:, sec] + mean[:, sec]
