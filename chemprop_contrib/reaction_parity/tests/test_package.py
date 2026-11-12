@@ -6,10 +6,7 @@ def test_package_is_importable_from_namespace():
         "reverse_bmg",
         "stack_reversed_bmg",
         "ParityEquivariantMPNN",
-        "build_parity_mask",
-        "ODD",
-        "EVEN",
-        "FREE",
+        "ParityTargetTransform",
     } <= set(reaction_parity.__all__)
     for name in reaction_parity.__all__:
         assert hasattr(reaction_parity, name)

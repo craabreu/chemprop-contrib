@@ -21,6 +21,16 @@ _VALID_PARITIES = (ODD, EVEN, FREE)
 # rather than admitted silently.
 _ALLOWED_PREDICTORS = frozenset({RegressionFFN, MveFFN, EvidentialFFN, QuantileFFN})
 
+# How each output component of a predictor unscales, as in chemprop's own output transform:
+# component 0 (the prediction) is affine; component j > 0 is multiplied by scale ** power[j]
+# (variance 2, interval width 1, dimensionless evidential parameters 0).
+COMPONENT_POWERS = {
+    RegressionFFN: (1,),
+    MveFFN: (1, 2),
+    EvidentialFFN: (1, 0, 0, 2),
+    QuantileFFN: (1, 1),
+}
+
 
 def normalize_task_parity(task_parity: Sequence[int]) -> list[int]:
     """Validate ``task_parity`` and return it as a list of plain ``int``.

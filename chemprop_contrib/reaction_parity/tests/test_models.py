@@ -16,18 +16,20 @@ from chemprop.nn.transforms import GraphTransform, ScaleTransform, UnscaleTransf
 import lightning.pytorch as pl
 import numpy as np
 import pytest
-from sklearn.preprocessing import StandardScaler
 import torch
 
 from chemprop_contrib.reaction_parity.featurizers import ParityCGRFeaturizer, reverse_bmg
 from chemprop_contrib.reaction_parity.models import ParityEquivariantMPNN
 from chemprop_contrib.reaction_parity.parity import EVEN, FREE, ODD
+from chemprop_contrib.reaction_parity.targets import ParityTargetTransform
 
 from . import make_test_data
 from .conftest import alchemical_smis, make_rxn, reverse_rxn_smi, rxn_smis
 
 D_H = 16
-PARITY = [ODD, EVEN, FREE]
+def _target(n_tasks=3, odd=(0,), even=(1,), **kwargs):
+    return ParityTargetTransform(n_tasks, odd=odd, even=even, **kwargs)
+
 # the fixture reactions have no atom with two bonds, so D-MPNN message updates (W_h) are inert
 # on them; this one has a three-atom chain and exercises every encoder weight
 CHAIN_SMI = "[CH3:1][CH2:2][OH:3]>>[CH2:1]=[CH2:2].[OH2:3]"
@@ -45,7 +47,7 @@ def _reverse(feat, bmg):
 def _model(
     feat=None,
     predictor=None,
-    task_parity=PARITY,
+    target=None,
     batch_norm=False,
     d_vd=None,
     d_xd=0,
@@ -53,6 +55,7 @@ def _model(
     **kwargs,
 ):
     feat = feat or ParityCGRFeaturizer()
+    target = _target() if target is None else target
     torch.manual_seed(0)
     mp = BondMessagePassing(
         d_v=feat.atom_fdim,
@@ -62,10 +65,10 @@ def _model(
         graph_transform=graph_transform,
     )
     predictor = predictor or RegressionFFN(
-        n_tasks=len(task_parity), input_dim=mp.output_dim + d_xd, hidden_dim=D_H
+        n_tasks=target.n_tasks, input_dim=mp.output_dim + d_xd, hidden_dim=D_H
     )
     return ParityEquivariantMPNN.from_featurizer(
-        feat, mp, MeanAggregation(), predictor, task_parity, batch_norm=batch_norm, **kwargs
+        feat, mp, MeanAggregation(), predictor, target, batch_norm=batch_norm, **kwargs
     )
 
 
@@ -246,62 +249,36 @@ def test_encoding_is_unchanged():
 
 
 # ---------------------------------------------------------------------------------------------
-# R7 validation and the target-scaler mean
+# R7 validation and the target transform
 
 
-def test_rejects_nonzero_odd_task_target_mean():
-    transform = UnscaleTransform(mean=[0.0, 1.0, 2.0, 3.0], scale=[1.0] * 4)
-    predictor = RegressionFFN(n_tasks=4, input_dim=D_H, output_transform=transform)
-    with pytest.raises(ValueError, match=r"scaler\.mean_\[odd_cols\] = 0\.0") as e:
-        _model(predictor=predictor, task_parity=[ODD, ODD, EVEN, ODD])
-    assert "[1, 3]" in str(e.value)
-
-
-def _targets_with_nonzero_means():
-    rng = np.random.default_rng(0)
-    return rng.normal(loc=[3.0, -2.0, 5.0], scale=[1.0, 2.0, 0.5], size=(20, 3))
-
-
-def test_rejects_with_mean_false_scaler():
-    # pitfall: with_mean=False still sets mean_, and from_standard_scaler copies it
-    scaler = StandardScaler(with_mean=False).fit(_targets_with_nonzero_means())
-    assert np.all(scaler.mean_ != 0)
-    transform = UnscaleTransform.from_standard_scaler(scaler)
+def test_rejects_predictor_with_output_transform():
+    transform = UnscaleTransform(mean=[0.0] * 3, scale=[1.0] * 3)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
-    with pytest.raises(ValueError, match=r"\[0\]"):
+    with pytest.raises(ValueError, match="output_transform"):
         _model(predictor=predictor)
 
 
-@torch.no_grad()
-def test_accepts_scaler_with_zeroed_odd_mean():
-    Y = _targets_with_nonzero_means()
-    scaler = StandardScaler().fit(Y)
-    odd_cols = [i for i, p in enumerate(PARITY) if p == ODD]
-    scaler.mean_[odd_cols] = 0.0
-    # transform and unscale stay consistent: odd column is only divided by its scale
-    np.testing.assert_allclose(scaler.transform(Y)[:, 0], Y[:, 0] / scaler.scale_[0])
-
-    transform = UnscaleTransform.from_standard_scaler(scaler)
-    predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
-    feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, predictor=predictor).eval()
-    f = model(bmg)
-    torch.testing.assert_close(model(_reverse(feat, bmg))[:, 0], -f[:, 0], rtol=0, atol=1e-5)
+def test_rejects_target_that_is_not_a_parity_target_transform():
+    with pytest.raises(TypeError, match="ParityTargetTransform"):
+        _model(
+            predictor=RegressionFFN(n_tasks=3, input_dim=D_H),
+            target=UnscaleTransform(mean=[0.0] * 3, scale=[1.0] * 3),
+        )
 
 
-def test_accepts_nonzero_mean_on_even_and_free_tasks():
-    transform = UnscaleTransform(mean=[0.0, 5.0, 7.0], scale=[1.0] * 3)
-    predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
-    _model(predictor=predictor)
+@pytest.mark.parametrize("cls", [MveFFN, EvidentialFFN, QuantileFFN])
+def test_rejects_paired_columns_with_uncertainty_predictors(cls):
+    predictor = cls(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
+    with pytest.raises(ValueError, match="Paired columns need a RegressionFFN"):
+        _model(predictor=predictor, target=ParityTargetTransform(2, paired_reverse={0: 1}))
 
 
 @torch.no_grad()
-def test_zero_mean_odd_task_is_unbiased():
-    mean, scale = [0.0, 5.0, 7.0], [2.0, 3.0, 4.0]
-    transform = UnscaleTransform(mean=mean, scale=scale)
-    predictor = RegressionFFN(n_tasks=3, input_dim=D_H, output_transform=transform)
+def test_target_transform_unscales_after_the_combination():
+    target = _target(mean=[0.0, 5.0, 7.0], scale=[2.0, 3.0, 4.0])
     feat, bmg = _featurize(rxn_smis)
-    model = _model(feat, predictor=predictor).eval()
+    model = _model(feat, target=target).eval()
 
     g_f = model.predictor.ffn(model.fingerprint(bmg))
     g_r = model.predictor.ffn(model.fingerprint(_reverse(feat, bmg)))
@@ -343,7 +320,7 @@ def test_from_featurizer_rejects_stock_cgr_featurizer():
     mp = BondMessagePassing(d_v=stock.atom_fdim, d_e=stock.bond_fdim, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(TypeError, match="ParityCGRFeaturizer"):
-        ParityEquivariantMPNN.from_featurizer(stock, mp, MeanAggregation(), predictor, PARITY)
+        ParityEquivariantMPNN.from_featurizer(stock, mp, MeanAggregation(), predictor, _target())
 
 
 @pytest.mark.parametrize("which", ["d_v", "d_e"])
@@ -354,7 +331,7 @@ def test_from_featurizer_rejects_encoder_width_mismatch(which):
     mp = BondMessagePassing(d_v=d_v, d_e=d_e, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match=f"{which} = .* but the featurizer"):
-        ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, PARITY)
+        ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, _target())
 
 
 def test_start_index_upper_bound_skipped_without_message_passing_dims(monkeypatch):
@@ -362,10 +339,10 @@ def test_start_index_upper_bound_skipped_without_message_passing_dims(monkeypatc
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
     monkeypatch.setattr(type(mp), "hparams", property(lambda self: {}))
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
-    model = ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, PARITY)
+    model = ParityEquivariantMPNN.from_featurizer(feat, mp, MeanAggregation(), predictor, _target())
     assert model.odd_atom_start == feat.odd_atom_start
     with pytest.raises(ValueError, match="odd_atom_start must satisfy 0 < odd_atom_start < d_v,"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, 0, feat.odd_bond_start, PARITY)
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, 0, feat.odd_bond_start, _target())
 
 
 def test_rejects_disallowed_predictor():
@@ -381,7 +358,9 @@ def test_rejects_out_of_range_atom_start(start):
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="odd_atom_start must satisfy"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, start, feat.odd_bond_start, PARITY)
+        ParityEquivariantMPNN(
+            mp, MeanAggregation(), predictor, start, feat.odd_bond_start, _target()
+        )
 
 
 @pytest.mark.parametrize("start", [0, -1, "bond_fdim"])
@@ -391,7 +370,9 @@ def test_rejects_out_of_range_bond_start(start):
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="odd_bond_start must satisfy"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, start, PARITY)
+        ParityEquivariantMPNN(
+            mp, MeanAggregation(), predictor, feat.odd_atom_start, start, _target()
+        )
 
 
 @pytest.mark.parametrize("bad", [10.5, True])
@@ -400,41 +381,34 @@ def test_rejects_non_integral_start(bad):
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=D_H)
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="odd_atom_start must be an integer"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, bad, feat.odd_bond_start, PARITY)
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, bad, feat.odd_bond_start, _target())
     with pytest.raises(ValueError, match="odd_bond_start must be an integer"):
-        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, bad, PARITY)
+        ParityEquivariantMPNN(mp, MeanAggregation(), predictor, feat.odd_atom_start, bad, _target())
 
 
-def test_rejects_wrong_task_parity_length():
+def test_rejects_target_with_wrong_number_of_tasks():
     predictor = RegressionFFN(n_tasks=3, input_dim=D_H)
     with pytest.raises(ValueError, match="n_tasks"):
-        _model(predictor=predictor, task_parity=[ODD, EVEN])
+        _model(predictor=predictor, target=ParityTargetTransform(2, odd=[0]))
 
 
-@pytest.mark.parametrize("bad", [[-0.5, 0.7, 1.9], [ODD, True, FREE], [ODD, EVEN, 1.0]])
-def test_rejects_non_integer_task_parity(bad):
-    with pytest.raises(ValueError, match="Invalid parity values"):
-        _model(task_parity=bad)
-
-
-def test_accepts_numpy_integer_task_parity():
-    model = _model(task_parity=np.array(PARITY))
-    assert model.task_parity == PARITY
-    assert all(type(p) is int for p in model.task_parity)
-
-
-def test_task_parity_and_mask_are_stored():
-    model = _model(task_parity=(ODD, EVEN, FREE))
+def test_target_transform_and_mask_are_stored():
+    target = _target()
+    model = _model(target=target)
+    # the model keeps its own copy
+    assert model.target_transform is not target
+    assert model.target_transform.pairs == target.pairs
+    assert model.target_transform.odd == target.odd and model.target_transform.even == target.even
     assert model.task_parity == [ODD, EVEN, FREE]
-    assert all(type(p) is int for p in model.task_parity)
     assert "parity_mask" not in model.state_dict()
+    assert {"target_transform.mean", "target_transform.scale"} <= set(model.state_dict())
     assert torch.equal(model.parity_mask, torch.tensor([-1.0, 1.0, 0.0]))
     feat = ParityCGRFeaturizer()
     assert model.odd_atom_start == feat.odd_atom_start
     assert model.odd_bond_start == feat.odd_bond_start
     assert model.hparams["odd_atom_start"] == feat.odd_atom_start
     assert model.hparams["odd_bond_start"] == feat.odd_bond_start
-    assert model.hparams["task_parity"] == [ODD, EVEN, FREE]
+    assert model.hparams["target_transform"] is model.target_transform
 
 
 # ---------------------------------------------------------------------------------------------
@@ -533,7 +507,7 @@ def _odd_even_outputs(cls):
     """Eval-mode outputs ``(f, f_rev)``, each ``(B, 2, n_targets)``, for tasks ``[ODD, EVEN]``."""
     feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     predictor = cls(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
-    model = _model(feat, predictor=predictor, task_parity=[ODD, EVEN]).eval()
+    model = _model(feat, predictor=predictor, target=_target(2)).eval()
     with torch.no_grad():
         return model(bmg), model(_reverse(feat, bmg))
 
@@ -575,7 +549,7 @@ def test_mve_loss_is_finite_for_odd_task(monkeypatch):
     # column must come out of the combination positive
     feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
     predictor = MveFFN(n_tasks=2, input_dim=D_H, hidden_dim=D_H)
-    model = _model(feat, predictor=predictor, task_parity=[ODD, ODD]).train()
+    model = _model(feat, predictor=predictor, target=_target(2, odd=(0, 1), even=())).train()
     _record_logs(model, monkeypatch)
 
     assert (model._train_preds(bmg)[..., 1] > 0).all()
@@ -609,35 +583,34 @@ def test_fixture_targets_have_the_parity_they_claim():
         assert even == pytest.approx(float(r["y_even"]), abs=1e-9)
 
 
-def _datasets(feat, n_train=N_TRAIN, n_val=N_VAL):
+def _datasets(feat, n_train=N_TRAIN, n_val=N_VAL, spec=None, as_reverse=False):
+    """Fixture datasets; ``as_reverse`` replaces y_odd with ea - y_odd, the reverse value of a
+    pair whose forward value is ea and whose difference is y_odd."""
     rows = _fixture_rows()[: n_train + n_val]
+    ys = [[float(r[c]) for c in FIXTURE_COLS] for r in rows]
+    if as_reverse:
+        ys = [[ea, ea - d, lam] for ea, d, lam in ys]
     dps = [
-        ReactionDatapoint.from_smi(
-            r["smiles"], y=[float(r[c]) for c in FIXTURE_COLS], keep_h=True, add_h=False
-        )
-        for r in rows
+        ReactionDatapoint.from_smi(r["smiles"], y=y, keep_h=True, add_h=False)
+        for r, y in zip(rows, ys)
     ]
     train = ReactionDataset(dps[:n_train], featurizer=feat)
     val = ReactionDataset(dps[n_train:], featurizer=feat)
-    # supported scaler recipe (as in the README): zero the odd columns' mean, and scale them by
-    # their root mean square about zero
-    scaler = StandardScaler().fit(train.Y)
-    odd_cols = [i for i, p in enumerate(FIXTURE_PARITY) if p == ODD]
-    scaler.mean_[odd_cols] = 0.0
-    scaler.scale_[odd_cols] = np.sqrt(np.nanmean(train.Y[:, odd_cols] ** 2, axis=0))
-    train.normalize_targets(scaler)
-    val.normalize_targets(scaler)
-    return train, val, UnscaleTransform.from_standard_scaler(scaler)
+    # as in the README: fit the transform, normalize both datasets with its scaler
+    target = ParityTargetTransform.fit(train.Y, **(spec or dict(odd=[1], even=[2])))
+    train.normalize_targets(target.to_standard_scaler())
+    val.normalize_targets(target.to_standard_scaler())
+    return train, val, target
 
 
-def _fixture_model(feat, output_transform):
+def _fixture_model(feat, target, task_weights=None):
     torch.manual_seed(0)
     mp = BondMessagePassing(d_v=feat.atom_fdim, d_e=feat.bond_fdim, d_h=32)
     predictor = RegressionFFN(
-        n_tasks=3, input_dim=mp.output_dim, hidden_dim=32, output_transform=output_transform
+        n_tasks=3, input_dim=mp.output_dim, hidden_dim=32, task_weights=task_weights
     )
     return ParityEquivariantMPNN.from_featurizer(
-        feat, mp, MeanAggregation(), predictor, FIXTURE_PARITY, batch_norm=True
+        feat, mp, MeanAggregation(), predictor, target, batch_norm=True
     )
 
 
@@ -667,14 +640,17 @@ def _eval_loss(model, loader):
     """Criterion on eval-mode combined predictions, in the scaled target space."""
     was_training = model.training
     model.eval()
-    # in eval() the output transform unscales, so map back to the space of the scaled targets
-    tf = model.predictor.output_transform
+    # in eval() the target transform unscales, so map back to the space of the scaled targets
+    tf = model.target_transform
     total, n = 0.0, 0
-    for bmg, _, _, targets, weights, lt, gt in loader:
+    for bmg, _, _, targets, weights, *_ in loader:
         preds = (model(bmg) - tf.mean) / tf.scale
-        total += float(model.criterion(preds, targets, targets.isfinite(), weights, lt, gt)) * len(
-            bmg
-        )
+        if tf.pairs:  # the loss also scores each pair's implied member
+            preds = torch.cat((preds, tf.implied(preds)), dim=1)
+            targets = torch.cat((targets, tf.implied(targets)), dim=1)
+        mask = targets.isfinite()
+        loss = model.criterion(preds, targets.nan_to_num(nan=0.0), mask, weights, None, None)
+        total += float(loss) * len(bmg)
         n += len(bmg)
     model.train(was_training)
     return total / n
@@ -745,7 +721,7 @@ def test_checkpoint_round_trip_preserves_parity(tmp_path):
     for hp in (loaded.hparams, model.hparams):
         assert hp["odd_atom_start"] == feat.odd_atom_start
         assert hp["odd_bond_start"] == feat.odd_bond_start
-        assert hp["task_parity"] == FIXTURE_PARITY
+        assert hp["target_transform"].task_parity == FIXTURE_PARITY
     assert loaded.odd_atom_start == feat.odd_atom_start
     assert loaded.odd_bond_start == feat.odd_bond_start
     assert loaded.task_parity == FIXTURE_PARITY
@@ -765,3 +741,214 @@ def test_checkpoint_round_trip_preserves_parity(tmp_path):
     assert from_file.task_parity == FIXTURE_PARITY
     assert torch.equal(from_file.parity_mask, model.parity_mask)
     torch.testing.assert_close(from_file(bmg), model(bmg), rtol=0, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------------------------
+# paired columns: the fixture's "ea" column (0) is the forward value of a pair whose difference
+# is the odd column y_odd; column 1 holds either that difference or the implied reverse value
+
+PAIR_D = dict(paired_difference={0: 1}, even=[2])
+PAIR_R = dict(paired_reverse={0: 1}, even=[2])
+SCALING_D = dict(mean=[7.0, 0.0, 2.0], scale=[3.0, 5.0, 1.5])
+SCALING_R = dict(mean=[7.0, 7.0, 2.0], scale=[3.0, 3.0, 1.5], difference_scale=[5.0])
+
+
+def _as_double(bmg):
+    bmg.V, bmg.E = bmg.V.double(), bmg.E.double()
+    return bmg
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("spec, scaling", [(PAIR_D, SCALING_D), (PAIR_R, SCALING_R)])
+def test_pairs_are_exactly_consistent(parity_smi, spec, scaling):
+    smis = [parity_smi, CHAIN_SMI]
+    feat, bmg = _featurize(smis)
+    _, bmg_rev = _featurize([reverse_rxn_smi(s) for s in smis], feat)
+    bmg, bmg_rev = _as_double(bmg), _as_double(bmg_rev)
+    model = _model(feat, target=ParityTargetTransform(3, **spec, **scaling)).double().eval()
+    f, f_rev = model(bmg), model(bmg_rev)
+    torch.testing.assert_close(f_rev, model(_reverse(feat, bmg)), rtol=0, atol=1e-12)
+    if spec is PAIR_D:  # the forward value of x̄ is forward - difference of x; difference is odd
+        torch.testing.assert_close(f_rev[:, 0], f[:, 0] - f[:, 1], rtol=0, atol=1e-12)
+        torch.testing.assert_close(f_rev[:, 1], -f[:, 1], rtol=0, atol=1e-12)
+    else:  # reversal swaps forward and reverse
+        torch.testing.assert_close(f_rev[:, :2], f[:, [1, 0]], rtol=0, atol=1e-12)
+    assert (f[:, 0] - f_rev[:, 0]).abs().max() > 1e-6  # not vacuous
+
+
+@torch.no_grad()
+def test_paired_training_and_eval_paths_agree():
+    # the loss sees scaled predictions; unscaling them gives the eval-mode output
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
+    target = ParityTargetTransform(3, **PAIR_D, **SCALING_D)
+    model = _model(feat, target=target).eval()
+    model.on_validation_model_eval()  # eval, with the target transform in train mode
+    scaled = model._train_preds(bmg)
+    model.eval()
+    torch.testing.assert_close(model(bmg), scaled * target.scale + target.mean, rtol=0, atol=1e-5)
+
+
+@torch.no_grad()
+def test_loss_scores_the_implied_member_where_both_labels_are_known():
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
+    model = _model(feat, target=ParityTargetTransform(3, **PAIR_D, **SCALING_D)).train()
+    tf = model.target_transform
+    Y = torch.tensor([[10.0, 4.0, 1.0]]).repeat(len(bmg), 1)
+    Y[1, 1] = float("nan")  # forward only
+    Y[2, 0] = float("nan")  # difference only
+    batch = _batch(bmg, targets=(Y - tf.mean) / tf.scale)
+    batch[6][3, 0] = True  # a bound, not a value, on the forward column
+    preds, targets, mask, _, lt_mask, gt_mask = model._loss_inputs(batch)
+
+    assert preds.shape == targets.shape == mask.shape == lt_mask.shape == (len(bmg), 4)
+    torch.testing.assert_close(preds[:, 3:], tf.implied(preds[:, :3]))
+    # the implied reverse value 10 - 4 = 6, scaled like the forward column
+    torch.testing.assert_close(targets[0, 3], torch.tensor((6.0 - 7.0) / 3.0))
+    assert mask[:, 3].tolist() == [True, False, False, False, *[True] * (len(bmg) - 4)]
+    assert not lt_mask[:, 3].any() and not gt_mask[:, 3].any()
+
+
+def test_both_declarations_of_a_pair_train_alike(monkeypatch):
+    # the same data given as (forward, difference) or as (forward, reverse) gives the same loss,
+    # since both score forward, reverse and difference
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
+    rng = np.random.default_rng(0)
+    n = len(bmg)
+    ea, de, lam = rng.normal(30.0, 8.0, n), rng.normal(5.0, 9.0, n), rng.random(n)
+    de[0] = np.nan  # a row with the forward value only
+    losses = []
+    for Y, spec in ((np.c_[ea, de, lam], PAIR_D), (np.c_[ea, ea - de, lam], PAIR_R)):
+        target = ParityTargetTransform.fit(Y, **spec)
+        model = _model(feat, target=target).train()
+        _record_logs(model, monkeypatch)
+        Z = torch.tensor((Y - target.mean.double().numpy()) / target.scale.double().numpy())
+        losses.append(model.training_step(_batch(bmg, targets=Z.float()), 0))
+    torch.testing.assert_close(losses[0], losses[1], rtol=1e-5, atol=0)
+
+
+@pytest.mark.parametrize(
+    "pair, extra", [(dict(paired_difference={0: 1}), 2.0), (dict(paired_reverse={0: 1}), 1.0)]
+)
+def test_implied_members_get_loss_weights(pair, extra):
+    # an implied reverse value takes its forward column's weight, an implied difference 1
+    predictor = RegressionFFN(
+        n_tasks=3, input_dim=D_H, hidden_dim=D_H, task_weights=[2.0, 3.0, 4.0]
+    )
+    model = _model(predictor=predictor, target=ParityTargetTransform(3, **pair))
+    for metric in (model.criterion, model.metrics[-1]):
+        assert metric.task_weights.tolist() == [[2.0, 3.0, 4.0, extra]]
+
+
+def test_paired_column_trains_without_difference_labels(monkeypatch):
+    # rows with only the forward value labelled still train it, through both heads
+    feat, bmg = _featurize([*rxn_smis, CHAIN_SMI])
+    model = _model(feat, target=ParityTargetTransform(3, **PAIR_D)).train()
+    _record_logs(model, monkeypatch)
+    targets = torch.randn(len(bmg), 3)
+    targets[:, 1] = float("nan")
+    loss = model.training_step(_batch(bmg, targets=targets), 0)
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    loss.backward()
+    w = model.predictor.ffn[-1][-1].weight.grad  # output layer: one row per head
+    assert w[0].abs().sum() > 0 and w[1].abs().sum() > 0
+
+
+@torch.no_grad()
+@lightning_warnings
+def test_checkpoint_round_trip_preserves_pairing(tmp_path):
+    pl.seed_everything(0)
+    feat = ParityCGRFeaturizer()
+    train, val, target = _datasets(feat, spec=PAIR_R, as_reverse=True)
+    model = _fixture_model(feat, target, task_weights=[1.0, 2.0, 1.0])
+    trainer = _trainer(2)
+    with torch.enable_grad():
+        trainer.fit(
+            model,
+            build_dataloader(train, batch_size=8, num_workers=0, seed=0),
+            build_dataloader(val, batch_size=8, num_workers=0, shuffle=False),
+        )
+    path = tmp_path / "paired.ckpt"
+    trainer.save_checkpoint(path)
+
+    model.eval()
+    bmg = BatchMolGraph([val[i].mg for i in range(len(val))])
+    for loaded in (
+        ParityEquivariantMPNN.load_from_checkpoint(path),
+        ParityEquivariantMPNN.load_from_file(path),
+    ):
+        loaded.eval()
+        tf = loaded.target_transform
+        assert tf.paired_reverse == {0: 1} and tf.paired_difference == {}
+        for name in ("mean", "scale", "difference_scale"):
+            torch.testing.assert_close(getattr(tf, name), getattr(target, name), rtol=0, atol=0)
+        assert loaded.criterion.task_weights.tolist() == [[1.0, 2.0, 1.0, 1.0]]
+        f = loaded(bmg)
+        torch.testing.assert_close(f, model(bmg), rtol=0, atol=1e-5)
+        f_rev = loaded(_reverse(feat, bmg))
+        torch.testing.assert_close(f_rev[:, :2], f[:, [1, 0]], rtol=0, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------------------------
+# the transform's mode decides scaled vs unscaled output, so it must start in sync with the model
+
+
+def test_models_built_from_one_transform_are_independent():
+    target = _target(mean=[0.0, 5.0, 7.0], scale=[2.0, 3.0, 4.0]).eval()  # even if left in eval
+    a, b = _model(target=target), _model(target=target)
+    assert a.target_transform.training and b.target_transform.training
+    a.eval()
+    assert b.target_transform.training
+    a.double()
+    assert b.target_transform.scale.dtype == torch.float32
+
+
+@torch.no_grad()
+@lightning_warnings
+def test_model_saved_in_eval_mode_reloads_ready_to_train(tmp_path):
+    feat, model, trainer, _, _, val = _fit(max_epochs=1)
+    model.eval()
+    path = tmp_path / "eval.ckpt"
+    trainer.save_checkpoint(path)
+    bmg = BatchMolGraph([val[i].mg for i in range(len(val))])
+    for loaded in (
+        ParityEquivariantMPNN.load_from_checkpoint(path),
+        ParityEquivariantMPNN.load_from_file(path),
+    ):
+        assert loaded.training and loaded.target_transform.training
+        # train mode returns scaled predictions, as the loss expects
+        tf = loaded.target_transform
+        loaded.eval()
+        expected = (loaded(bmg) - tf.mean) / tf.scale
+        loaded.train()
+        loaded.bn.eval()  # running statistics, so only the transform's mode differs
+        torch.testing.assert_close(loaded._train_preds(bmg), expected, rtol=0, atol=1e-4)
+
+
+@torch.no_grad()
+@lightning_warnings
+@pytest.mark.parametrize("as_reverse", [False, True], ids=["difference", "reverse"])
+def test_pair_learns_its_difference(as_reverse):
+    # the fixture's odd column is learnable, so after training the predicted forward(x) -
+    # forward(x̄), which is exactly the predicted difference, must track the labelled difference
+    pl.seed_everything(0)
+    feat = ParityCGRFeaturizer()
+    train, val, target = _datasets(
+        feat, spec=PAIR_R if as_reverse else PAIR_D, as_reverse=as_reverse
+    )
+    model = _fixture_model(feat, target)
+    loader = build_dataloader(train, batch_size=N_TRAIN, num_workers=0, shuffle=False)
+    before = _eval_loss(model, loader)
+    with torch.enable_grad():
+        _trainer(100).fit(
+            model,
+            build_dataloader(train, batch_size=8, num_workers=0, seed=0),
+            build_dataloader(val, batch_size=8, num_workers=0, shuffle=False),
+        )
+    assert _eval_loss(model, loader) < 0.5 * before
+
+    model.eval()
+    bmg = BatchMolGraph([train[i].mg for i in range(len(train))])
+    gap = model(bmg)[:, 0] - model(_reverse(feat, bmg))[:, 0]
+    Y = train._Y
+    labelled = torch.tensor(Y[:, 0] - Y[:, 1] if as_reverse else Y[:, 1], dtype=gap.dtype)
+    assert torch.corrcoef(torch.stack([gap, labelled]))[0, 1] > 0.9
