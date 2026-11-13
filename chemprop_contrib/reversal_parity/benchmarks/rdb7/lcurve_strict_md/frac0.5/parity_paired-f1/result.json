@@ -1,0 +1,20 @@
+{
+  "model": "parity_paired",
+  "fold": 1,
+  "split": "strict",
+  "best_epoch": 109,
+  "fraction": 0.5,
+  "n_train_reactions": 5068,
+  "epochs_run": 200,
+  "val_every": 2,
+  "train_time_s": 1370.6,
+  "package": "/tmp/claude-1000/-home-charlles-github-repos-chemprop-contrib--claude-worktrees-reaction-parity/d614dc31-7a4a-4fe1-9021-e4ced7195e61/scratchpad/lcurve/md_42887e4/chemprop_contrib/reversal_parity/featurizers.py",
+  "all_Ea_MAE": 7.809680373446646,
+  "all_Ea_RMSE": 11.026716032851976,
+  "fwd_Ea_MAE": 7.827589301771114,
+  "rev_Ea_MAE": 7.791771445122181,
+  "all_dE_MAE": 7.918412360839599,
+  "all_dE_RMSE": 11.858494822555802,
+  "antisym_dE_mean": 1.857427244714e-06,
+  "consistency_MAE": 3.4091714691536226e-06
+}

@@ -1,0 +1,15 @@
+{
+  "model": "stock",
+  "fold": 0,
+  "split": "strict",
+  "best_epoch": 39,
+  "train_time_s": 738.6,
+  "all_Ea_MAE": 20.339926654976427,
+  "all_Ea_RMSE": 30.584530393474935,
+  "fwd_Ea_MAE": 6.492285471067907,
+  "rev_Ea_MAE": 34.187567838884945,
+  "all_dE_MAE": 27.34338258331248,
+  "all_dE_RMSE": 41.084967557706,
+  "antisym_dE_mean": 48.09650533733559,
+  "consistency_MAE": 33.17342178159733
+}

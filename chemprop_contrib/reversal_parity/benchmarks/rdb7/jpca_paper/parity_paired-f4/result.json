@@ -1,0 +1,15 @@
+{
+  "model": "parity_paired",
+  "fold": 4,
+  "split": "paper",
+  "best_epoch": 51,
+  "train_time_s": 1417.1,
+  "all_Ea_MAE": 4.7169328298809505,
+  "all_Ea_RMSE": 7.626293701575095,
+  "fwd_Ea_MAE": 4.4193403271034155,
+  "rev_Ea_MAE": 5.014525332658485,
+  "all_dE_MAE": 4.254097183292361,
+  "all_dE_RMSE": 6.8588899423537955,
+  "antisym_dE_mean": 2.315225765071591e-06,
+  "consistency_MAE": 3.6850958837747375e-06
+}

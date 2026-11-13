@@ -1,0 +1,23 @@
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Loading `train_dataloader` to estimate number of stepping batches.
+`Trainer.fit` stopped: `max_epochs=100` reached.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+{
+  "model": "parity_marcus",
+  "fold": 0,
+  "split": "paper",
+  "best_epoch": 56,
+  "train_time_s": 914.9,
+  "all_Ea_MAE": 4.395772527961843,
+  "all_Ea_RMSE": 7.410263502982914,
+  "fwd_Ea_MAE": 4.158876968033088,
+  "rev_Ea_MAE": 4.632668087890599,
+  "all_dE_MAE": 3.9253938000315287,
+  "all_dE_RMSE": 6.675402645923601,
+  "antisym_dE_mean": 2.3581056363025035e-06,
+  "consistency_MAE": 2.174095655826591e-06
+}

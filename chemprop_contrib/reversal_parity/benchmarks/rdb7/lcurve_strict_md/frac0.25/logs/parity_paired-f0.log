@@ -1,0 +1,28 @@
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Loading `train_dataloader` to estimate number of stepping batches.
+`Trainer.fit` stopped: `max_epochs=400` reached.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+{
+  "model": "parity_paired",
+  "fold": 0,
+  "split": "strict",
+  "best_epoch": 159,
+  "fraction": 0.25,
+  "n_train_reactions": 2534,
+  "epochs_run": 400,
+  "val_every": 4,
+  "train_time_s": 1365.1,
+  "package": "/tmp/claude-1000/-home-charlles-github-repos-chemprop-contrib--claude-worktrees-reaction-parity/d614dc31-7a4a-4fe1-9021-e4ced7195e61/scratchpad/lcurve/md_42887e4/chemprop_contrib/reversal_parity/featurizers.py",
+  "all_Ea_MAE": 8.12559653274332,
+  "all_Ea_RMSE": 11.514162721592971,
+  "fwd_Ea_MAE": 8.041389345636782,
+  "rev_Ea_MAE": 8.209803719849857,
+  "all_dE_MAE": 9.06862847994901,
+  "all_dE_RMSE": 12.27702007929253,
+  "antisym_dE_mean": 1.6847461848254986e-06,
+  "consistency_MAE": 3.063568867194812e-06
+}

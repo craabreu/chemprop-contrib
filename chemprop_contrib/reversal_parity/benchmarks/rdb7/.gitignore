@@ -1,0 +1,4 @@
+# This folder's data, splits, results and run logs are tracked; the repository ignores these types elsewhere.
+!*.csv
+!*.json
+!*.log
