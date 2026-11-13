@@ -4,6 +4,53 @@ Scripts, derived data, splits and results of the RDB7 reaction-barrier benchmark
 
 The scripts are kept as they ran. They contain absolute paths of the machine they ran on (`/home/charlles/...`), so they document the runs rather than being turnkey; adjust the paths before rerunning.
 
+## Key results
+
+Three models predict the forward barrier $E_a$ and the reaction energy $\Delta E$ of each reaction:
+
+- `stock`: Chemprop trained on forward reactions only;
+- `stock_aug`: Chemprop trained on forward and reversed reactions, the approach of the original paper;
+- `parity_paired`: `ParityEquivariantMPNN` trained on forward reactions only, with $E_a$ paired with $\Delta E$, so that $E_{a,\text{fwd}} - E_{a,\text{rev}} = \Delta E$ and $\Delta E(\bar x) = -\Delta E(x)$ hold by construction.
+
+A fourth entry, `stock_aug, symmetrized`, is `stock_aug` corrected after training to satisfy the same two identities (see [Results](#results)). Every test reaction is scored in both directions, and all numbers are means over five scaffold-split folds.
+
+### Consistency
+
+![Antisymmetry violation and pair inconsistency of each model on both splits, log scale](figures/consistency.png)
+
+The parity model's two directions agree to $2$–$3 \times 10^{-6}$ kcal/mol, which is float32 round-off. That is six orders of magnitude below `stock_aug`, whose forward and reverse predictions disagree by 2.5–3.5 kcal/mol on average, about half of its own error. `stock` never sees a reversed reaction and is inconsistent by 33–50 kcal/mol.
+
+### Accuracy
+
+![Barrier and reaction-energy MAE of stock_aug, its symmetrized form and parity_paired on the strict and paper splits](figures/accuracy.png)
+
+- On barriers, `parity_paired` ties `stock_aug`: 6.53 against 6.55 kcal/mol on the strict split and 4.76 against 4.70 on the paper split. Both are within the fold-to-fold spread.
+- On $\Delta E$, `parity_paired` beats `stock_aug` on both splits, by 0.17 (strict) and 0.06 kcal/mol (paper).
+- `stock_aug` symmetrized after training is the most accurate model on both targets, by 0.06–0.17 kcal/mol.
+- `stock` scores about 20 kcal/mol on barriers, because it cannot predict reverse barriers.
+
+### Parity plots
+
+![Predicted against reference barrier and reaction energy, and each model's forward-minus-reverse barrier against its own reaction energy, for stock, stock_aug and parity_paired on the strict split](figures/parity_strict.png)
+
+The test sets of the five folds are pooled, with both directions of every reaction, so the statistics differ slightly from the fold means in the tables. The paper split looks the same: [`figures/parity_paper.png`](figures/parity_paper.png).
+
+- **Top two rows (accuracy):** `stock` predicts the forward direction well but collapses on the reverse one. Reverse barriers come out as if they were forward barriers, a cloud at 60–100 kcal/mol whatever the reference, and $R^2$ drops to about 0. `stock_aug` and `parity_paired` scatter the same way around the diagonal ($R^2$ 0.90 for barriers and 0.96 for $\Delta E$ on the strict split, 0.94 and 0.98 on the paper split).
+- **Bottom row (self-consistency):** each model's own $E_{a,\text{fwd}} - E_{a,\text{rev}}$ against its own $\Delta E$. Thermodynamics requires the identity line. `stock` is far from it, `stock_aug` lies in a band around it, and `parity_paired` lies on it exactly.
+
+### Learning curve
+
+![Barrier and reaction-energy MAE against training-set size, and per-fold differences of parity_paired from the baselines](figures/learning_curve.png)
+
+With 10%, 25%, 50% and 100% of the strict training set, `parity_paired` stays within ±0.1 kcal/mol of `stock_aug` on barriers at every size. Its $\Delta E$ advantage is largest with the least data (0.31 kcal/mol at 10%), where `stock_aug`'s antisymmetry violation is also largest, and symmetrizing `stock_aug` after training removes it at every size. The built-in symmetry gives no data-efficiency gain here.
+
+### Summary
+
+- `parity_paired` is as accurate as `stock_aug` on barriers at every training size, while training on half as many datapoints, and its antisymmetry and pair consistency are exact.
+- Its $\Delta E$ advantage over `stock_aug` is the antisymmetry constraint itself: symmetrizing `stock_aug` after training recovers it.
+- Symmetrized `stock_aug` is the most accurate barrier model: ahead of `parity_paired` by 0.05–0.11 kcal/mol at every training size on the strict split, and by 0.16 kcal/mol on the paper split.
+- Halving the odd feature block ($h$ basis) cost 0.10 kcal/mol of barrier MAE on the strict split (same sign on all five folds) and 0.02 on the paper split.
+
 ## Data
 
 RDB7 (Spiekermann, Pattanaik & Green, *Sci. Data* **2022**, 9, 417; [Zenodo 6618262](https://zenodo.org/record/6618262), CC BY 4.0): about 12,000 gas-phase reactions with CCSD(T)-F12a/cc-pVDZ-F12//ωB97X-D3/def2-TZVP energies.
@@ -50,7 +97,7 @@ Every test reaction is scored in both directions. `result.json` reports barrier 
 
 Training times are not comparable across directories: they depend on how many runs shared the GPU. Under identical conditions (the learning curve, five folds at once with `OMP_NUM_THREADS=1`), `parity_paired` trained about 6% faster than `stock_aug`.
 
-`analysis/` holds the scripts that produced the tables below: `compare_v2.py`, `symmetrize_stock_aug.py`, `analyze_lcurve.py` (with `lcurve_driver.py`, which ran the learning curve), and `timing/` for the timing study.
+`analysis/` holds the scripts behind the tables and figures: `compare_v2.py`, `symmetrize_stock_aug.py`, `analyze_lcurve.py` (with `lcurve_driver.py`, which ran the learning curve), `plot_summary.py` (all figures in `figures/`, including the parity plots; it needs NumPy and Matplotlib), and `timing/` for the timing study.
 
 ## Results
 
@@ -87,10 +134,34 @@ Each fold trains on a seeded random subset of its training reactions, nested acr
 
 The 100% row uses `jpca_strict/stock_aug-f*` and `jpca_strict_v2/parity_paired-f*`.
 
-### Summary
+## Discussion
 
-- `parity_paired` matches `stock_aug` on barriers at every training size while training on half as many datapoints, and its antisymmetry and pair consistency are exact to single precision.
-- Its $\Delta E$ advantage over `stock_aug` is the antisymmetry constraint itself: symmetrizing `stock_aug` after training recovers it.
-- Symmetrized `stock_aug` is the most accurate barrier model, by 0.05–0.11 kcal/mol at every training size.
-- The built-in symmetry gives no data-efficiency gain on this benchmark.
-- Halving the odd feature block ($h$ basis) cost 0.10 kcal/mol of barrier MAE on the strict split (same sign on all five folds) and 0.02 on the paper split.
+### What the constraint buys
+
+The parity model makes two statements about every reaction exact: the reaction energy changes sign under reversal, and the forward barrier minus the reverse barrier equals the reaction energy. Augmentation teaches both only approximately. After training on both directions, `stock_aug` still disagrees with itself by about 3 kcal/mol on average, which is half of its own error. For a single prediction this may not matter, but it does when predictions feed a kinetic model: forward and reverse rate constants built from inconsistent barriers violate detailed balance, and a mechanism generator would have to repair them. With the parity model, $k_f/k_r = K$ holds by construction, in every direction the model is asked about, and with no post-processing step that a user could forget.
+
+### Why accuracy does not improve
+
+The constraint does not make the model more accurate, and the learning curve shows that it does not make it more data-efficient either. Two observations explain most of this.
+
+- **The symmetry group has two elements.** Reversal maps a reaction to its reverse and back, so augmentation already shows the network the whole orbit of every training reaction. The benefit of building an invariance into a model, rather than learning it, comes from the non-equivariant part of an unconstrained predictor, which augmentation leaves behind and a symmetrization removes (Elesedy & Zaidi, ICML 2021). With a two-element orbit that part is small: `stock_aug`'s antisymmetry violation is 3.5 kcal/mol on the strict split and 5.1 kcal/mol at 10% of the data. For large continuous groups, such as rotations, augmentation samples the orbit sparsely; that is the setting in which built-in equivariance has been found to improve data efficiency, with augmentation closing much of the gap given enough training (Brehmer et al., *Does equivariance matter at scale?*, arXiv:2410.23179, 2024).
+- **Projection after training captures the same gain.** Symmetrizing `stock_aug` after training removes its non-equivariant part exactly, which is the same projection the parity model applies inside the network. The result is at least as accurate as the parity model at every training size. The parity model's $\Delta E$ advantage over raw `stock_aug` is therefore the constraint, not better learning.
+
+The remaining 0.05–0.16 kcal/mol by which symmetrized `stock_aug` beats `parity_paired` on barriers has the same sign on nearly every fold but is unexplained. The two pipelines differ in more than the constraint: the featurizer (`ParityCGRFeaturizer` writes the element on both sides of the reaction, which `REAC_DIFF` does not), the optimization (`stock_aug` takes twice as many optimizer steps per epoch, each on 50 datapoints, while each parity step covers 50 reactions in both directions), and the loss, which for the parity model scores the forward barrier, the reverse barrier and the difference together. None of these was varied in isolation.
+
+The $h$-basis run shows that the model is sensitive to the scale of the input features. Halving the odd block, which changes nothing about the symmetry, cost 0.10 kcal/mol on the strict split. The feature scale is a training-dynamics choice, not a modeling one; the package keeps the full difference, which matches the scale of Chemprop's `REAC_DIFF`.
+
+### Cost
+
+Under identical conditions the parity model trains about 6% faster per epoch than `stock_aug`. It encodes each reaction twice in one stacked pass, but it has half as many datapoints, so the work per epoch is about the same and there are fewer optimizer steps. Prediction costs twice the encoder work of a stock model, since every reaction is encoded in both directions.
+
+### When to use it
+
+The parity model is the better choice when forward and reverse predictions must agree, such as rate constants for a kinetic mechanism, equilibrium-consistent pairs, or uncertainty estimates that must transform correctly under reversal. It is also simpler to train: the data stay in one direction, and nothing has to be symmetrized afterward. When only the accuracy of one direction matters, augmentation followed by symmetrization is equally good on this benchmark.
+
+### Limitations
+
+- One dataset (RDB7, small gas-phase reactions) and one architecture (the paper's).
+- One model per fold. GPU training is not bit-for-bit reproducible, and the run-to-run variation within a fold was not measured, so differences below about 0.1 kcal/mol should be read with care. The fold-to-fold spread (about ±0.5 kcal/mol) is shared by all models, since it reflects how hard each fold's test set is; the paired per-fold differences are the meaningful comparison.
+- The learning curve uses one random subset per fold and size, on the strict split only.
+- `stock`, `stock_aug` and the first `parity_paired` runs ran with an earlier version of the package API (see [Results directories](#results-directories)). The model and featurization code paths of `stock` and `stock_aug` did not change; `parity_paired` was rerun with the final code (`_v2`).
