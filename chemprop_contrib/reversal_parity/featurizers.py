@@ -5,11 +5,12 @@ featurizer emits :math:`(m, d)` with :math:`m = \tfrac12(x_r + x_p)` and
 :math:`d = x_p - x_r`, so that reversing a reaction is a sign flip on the trailing :math:`d`
 column block and leaves :math:`m` untouched.
 
-Every atom feature, including the element, gets both parts, so mapped atoms may change element.
-This admits alchemical transformations ``A>>B`` (e.g. phenol to toluene), with the atom map
-alone defining the topology: a mapped element change is single topology, unmapped atoms on
-each side are dual topology, and a mix is hybrid. Chemical reactions are the special case in
-which no mapped atom changes element.
+By default every atom feature, including the element, gets both parts, so mapped atoms may
+change element. This admits alchemical transformations ``A>>B`` (e.g. phenol to toluene), with
+the atom map alone defining the topology: a mapped element change is single topology, unmapped
+atoms on each side are dual topology, and a mix is hybrid. Chemical reactions are the special
+case in which no mapped atom changes element; for them, ``share_elements=True`` writes the
+element once, as Chemprop's CGR featurizer does.
 """
 
 from __future__ import annotations
@@ -38,6 +39,10 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
     balanced : bool, default=False
         whether to use the ``*_BALANCE`` bond behavior of the parent featurizer
         (``REAC_DIFF_BALANCE`` instead of ``REAC_DIFF``)
+    share_elements : bool, default=False
+        whether to write the element once, in the even block only, as Chemprop's
+        ``REAC_DIFF`` does. Mapped atoms must then keep their element, and featurizing a
+        reaction in which one does not raises :class:`ValueError`.
     mode_ : None
         not configurable; this featurizer defines its own layout. Passing a value raises
         :class:`ValueError`.
@@ -45,19 +50,24 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
     Notes
     -----
     Node layout (``atom_fdim = 2F``): ``[0:F]`` is the even block :math:`m`, ``[F:2F]`` the
-    odd block :math:`d`. Edge layout (``bond_fdim = 2B``): ``[0:B]`` is the even block
-    :math:`m`, ``[B:2B]`` the odd block :math:`d`.
+    odd block :math:`d`. With ``share_elements=True``, :math:`d` omits the element one-hot of
+    width ``k = len(atom_featurizer.atomic_nums) + 1``, so ``atom_fdim = 2F - k``, the same as
+    Chemprop's ``REAC_DIFF``, and the odd block is ``[F:2F-k]``. Edge layout
+    (``bond_fdim = 2B``): ``[0:B]`` is the even block :math:`m`, ``[B:2B]`` the odd block
+    :math:`d`.
 
     An atom absent from one side is a zero dummy atom there (``atom_featurizer(None)``), so a
-    vanishing atom has :math:`d = -x_r`. With ``balanced=True`` it is instead copied across
-    unchanged (:math:`d = 0`), Chemprop's ``*_BALANCE`` meaning of an unrecorded spectator. Unlike
-    Chemprop's ``REAC_DIFF``, the element is not written once: Chemprop assumes a mapped atom
-    keeps its element, which this featurizer does not.
+    vanishing atom has :math:`d = -x_r`. With ``share_elements=True`` the dummy keeps the
+    element (``atom_featurizer.num_only``), as in Chemprop. With ``balanced=True`` an absent
+    atom is instead copied across unchanged (:math:`d = 0`), Chemprop's ``*_BALANCE`` meaning
+    of an unrecorded spectator. With both options, the features are Chemprop's ``REAC_DIFF``
+    (or ``REAC_DIFF_BALANCE``) features :math:`(x_r, d)` mapped to :math:`(x_r + d/2, d)`.
     """
 
     # keyword-only, so that a third positional argument cannot land in ``mode_``
     _: KW_ONLY
     balanced: bool = False
+    share_elements: bool = False
     mode_: InitVar[str | RxnMode | None] = None
 
     def __post_init__(self, mode_: str | RxnMode | None):
@@ -68,6 +78,13 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
             )
         super().__post_init__(RxnMode.REAC_DIFF_BALANCE if self.balanced else RxnMode.REAC_DIFF)
         self.atom_fdim = 2 * len(self.atom_featurizer)
+        if self.share_elements:
+            self.atom_fdim -= self._n_element_cols
+
+    @property
+    def _n_element_cols(self) -> int:
+        # the element one-hot leads the atom features: one bit per listed element plus "other"
+        return len(self.atom_featurizer.atomic_nums) + 1
 
     @property
     def odd_atom_start(self) -> int:
@@ -78,6 +95,15 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
     def odd_bond_start(self) -> int:
         """First column of the odd (:math:`d`) block of the edge features."""
         return len(self.bond_featurizer)
+
+    def _absent_side(self, x: np.ndarray, atom) -> np.ndarray:
+        """Features, on the side where it is absent, of an unmapped atom featurized as ``x``:
+        a copy (``balanced``), its element only (``share_elements``), or a zero dummy atom."""
+        if self.balanced:
+            return x
+        if self.share_elements:
+            return self.atom_featurizer.num_only(atom)
+        return self.atom_featurizer(None)
 
     def _calc_node_feature_matrix(
         self,
@@ -95,19 +121,30 @@ class ParityCGRFeaturizer(CondensedGraphOfReactionFeaturizer):
         for a in rct.GetAtoms():
             x_r = f(a)
             if a.GetIdx() in reac_only:
-                x_p = x_r if self.balanced else f(None)
+                x_p = self._absent_side(x_r, a)
             else:
-                x_p = f(pdt.GetAtomWithIdx(r2p_idx_map[a.GetIdx()]))
+                b = pdt.GetAtomWithIdx(r2p_idx_map[a.GetIdx()])
+                if self.share_elements and a.GetAtomicNum() != b.GetAtomicNum():
+                    raise ValueError(
+                        f"mapped atom {a.GetAtomMapNum()} changes element ({a.GetSymbol()} -> "
+                        f"{b.GetSymbol()}), which share_elements=True cannot represent; use "
+                        "share_elements=False for alchemical transformations."
+                    )
+                x_p = f(b)
             X_r.append(x_r)
             X_p.append(x_p)
         for j in pdt_idxs:
-            x_p = f(pdt.GetAtomWithIdx(j))
-            X_r.append(x_p if self.balanced else f(None))
+            b = pdt.GetAtomWithIdx(j)
+            x_p = f(b)
+            X_r.append(self._absent_side(x_p, b))
             X_p.append(x_p)
 
         X_r = np.array(X_r, dtype=float).reshape(-1, len(f))
         X_p = np.array(X_p, dtype=float).reshape(-1, len(f))
-        return np.hstack((0.5 * (X_r + X_p), X_p - X_r))
+        D = X_p - X_r
+        if self.share_elements:
+            D = D[:, self._n_element_cols :]
+        return np.hstack((0.5 * (X_r + X_p), D))
 
     def _calc_edge_feature(self, b_reac: Bond | None, b_pdt: Bond | None) -> np.ndarray:
         # the parent's bond features are integer-valued; the half-sum needs a float dtype

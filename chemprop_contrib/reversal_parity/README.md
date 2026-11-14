@@ -18,7 +18,7 @@ a reorganization energy stays the same, and a forward barrier becomes the revers
 
 ## How it works
 
-1. `ParityCGRFeaturizer` emits CGR features in an $(m, d)$ basis, with $m = \tfrac12(x_r + x_p)$ the mean of the reactant-side and product-side features and $d = x_p - x_r$ their difference. In this basis, reversing a transformation is a sign flip on the contiguous $d$ block, so no second featurization is needed. Every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)).
+1. `ParityCGRFeaturizer` emits CGR features in an $(m, d)$ basis, with $m = \tfrac12(x_r + x_p)$ the mean of the reactant-side and product-side features and $d = x_p - x_r$ their difference. In this basis, reversing a transformation is a sign flip on the contiguous $d$ block, so no second featurization is needed. By default every atom feature gets both parts, including the element, so a mapped atom may change element (see [Alchemical transformations](#alchemical-transformations)). For chemical reactions, `ParityCGRFeaturizer(share_elements=True)` writes the element once, as Chemprop does (see [Shared elements](#shared-elements)).
 2. `ParityEquivariantMPNN` runs the same network $g$ (shared weights) on the batch and on its reversal, then combines the outputs per column: $\tfrac12[g(x) - g(\bar{x})]$ for odd, $\tfrac12[g(x) + g(\bar{x})]$ for even, $g(x)$ for free. A pair is predicted from an even mean and an odd difference (see [Pairs](#pairs-barriers-and-other-two-direction-properties)). The guarantee holds for any network $g$.
 
 Both directions go through the encoder in a single pass over a batch of twice as many graphs (`stack_reversed_bmg`). On RDB7 (small gas-phase reactions, batch size 64, one RTX 2080 SUPER), training takes about 15% longer than stock chemprop.
@@ -127,6 +127,12 @@ The atom map alone defines the topology of the transformation, as in alchemical 
 A chemical reaction is the special case in which no mapped atom changes element. Nothing checks atom maps for chemical plausibility, so a map that pairs atoms of different elements by mistake is featurized as an element change.
 
 On the side where an atom is absent it is a zero dummy atom: Chemprop's atom featurizer has no null bit, and an all-zero vector (`atom_featurizer(None)`) is unambiguous, since every real atom has exactly one element bit set. A vanishing atom therefore has $d = -x_A$ and an appearing atom $d = +x_B$, and the net element change summed over the graph is the same in every topology. With `ParityCGRFeaturizer(balanced=True)`, an atom absent from one side is instead copied across unchanged (Chemprop's meaning of an unrecorded spectator in an incomplete reaction).
+
+## Shared elements
+
+Chemprop's CGR featurizer writes each atom's element once, since a mapped atom keeps its element in a chemical reaction. `ParityCGRFeaturizer(share_elements=True)` does the same: the element one-hot appears only in the even block $m$, and the odd block $d$ leaves it out. The node features are then as wide as Chemprop's `REAC_DIFF` ones, and they are the same information in another basis: Chemprop's $(x_r, d)$ becomes $(x_r + \tfrac12 d, d)$, with the element columns of $x_r$ unchanged. An atom absent from one side keeps its element there, as in Chemprop (`atom_featurizer.num_only`), unless `balanced=True` copies it across whole.
+
+Use it for chemical reactions only. Featurizing a reaction in which a mapped atom changes element raises `ValueError`, since the odd block has no element columns to record the change. Unmapped atoms that vanish or appear are allowed. For a fully mapped chemical reaction the option changes no information: without it, $d$ is zero in the element columns anyway, and the option drops those columns. It differs only for unmapped atoms, whose absent side carries the element with the option and is a zero dummy atom without it.
 
 ## Things to know
 

@@ -4,7 +4,7 @@ import pytest
 
 from chemprop_contrib.reversal_parity.featurizers import ParityCGRFeaturizer
 
-from .conftest import alchemical_smis, make_rxn, rxn_smis
+from .conftest import alchemical_smis, make_rxn, reverse_rxn_smi, rxn_smis
 
 RING = "[cH:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1"
 SINGLE = f"{RING}[OH:7]>>{RING}[CH3:7]"
@@ -23,6 +23,10 @@ def test_dimensions():
     k = len(ours.atom_featurizer.atomic_nums) + 1
     assert ours.atom_fdim == core.atom_fdim + k
     assert ours.bond_fdim == core.bond_fdim
+    # with shared elements the element block is written once, exactly as in core REAC_DIFF
+    shared = ParityCGRFeaturizer(share_elements=True)
+    assert (shared.atom_fdim, shared.bond_fdim) == (core.atom_fdim, core.bond_fdim)
+    assert (shared.odd_atom_start, shared.odd_bond_start) == (F, B)
 
 
 @pytest.mark.parametrize("balanced", [False, True])
@@ -53,6 +57,39 @@ def test_agrees_with_reac_diff_on_element_preserving_reactions(balanced):
 
         np.testing.assert_array_equal(mg_ours.edge_index, mg_core.edge_index, err_msg=smi)
         np.testing.assert_array_equal(mg_ours.rev_edge_index, mg_core.rev_edge_index, err_msg=smi)
+
+
+@pytest.mark.parametrize("balanced", [False, True])
+def test_shared_elements_is_reac_diff_in_the_md_basis(balanced):
+    ours = ParityCGRFeaturizer(balanced=balanced, share_elements=True)
+    core = CondensedGraphOfReactionFeaturizer(
+        mode_="REAC_DIFF_BALANCE" if balanced else "REAC_DIFF"
+    )
+    F, k = ours.odd_atom_start, len(ours.atom_featurizer.atomic_nums) + 1
+
+    for smi in rxn_smis:
+        V, V_core = ours(make_rxn(smi)).V, core(make_rxn(smi)).V
+        m, d = V[:, :F], V[:, F:]
+        close = dict(atol=1e-6, err_msg=smi)
+        # core emits (x_r, d) with the element once in x_r; ours emits (m, d), m = x_r + d/2
+        np.testing.assert_allclose(m[:, :k], V_core[:, :k], **close)
+        np.testing.assert_allclose(m[:, k:] - 0.5 * d, V_core[:, k:F], **close)
+        np.testing.assert_allclose(d, V_core[:, F:], **close)
+        # reversal is still a sign flip on the odd block (atoms come in the other side's order)
+        V_rev = ours(make_rxn(reverse_rxn_smi(smi))).V
+        np.testing.assert_allclose(_sorted_rows(np.hstack((m, -d))), _sorted_rows(V_rev), **close)
+
+
+def test_shared_elements_rejects_element_changes():
+    feat = ParityCGRFeaturizer(share_elements=True)
+    with pytest.raises(ValueError, match="share_elements"):
+        feat(make_rxn(SINGLE))
+    # an element that vanishes or appears unmapped is not a change of a mapped atom
+    assert feat(make_rxn(DUAL)).V.shape[1] == feat.atom_fdim
+
+
+def _sorted_rows(A):
+    return A[np.lexsort(np.round(A, 6).T[::-1])]
 
 
 def _atom(mol, symbol):
