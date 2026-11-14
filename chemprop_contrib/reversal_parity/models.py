@@ -1,10 +1,12 @@
-"""An MPNN whose predictions are exactly parity-equivariant under reaction reversal."""
+"""MPNNs whose predictions are exactly parity-equivariant under the reversal of a
+transformation ``A>>B`` or the swap of an ordered pair of molecules ``(A, B)``."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import copy
 
-from chemprop.data import BatchMolGraph
+from chemprop.data import BatchMolGraph, MulticomponentTrainingBatch
 from chemprop.models import MPNN
 from chemprop.models.model import BatchType
 from chemprop.nn import Aggregation, MessagePassing, Predictor
@@ -16,7 +18,148 @@ from chemprop_contrib.reversal_parity.parity import COMPONENT_POWERS, FREE, buil
 from chemprop_contrib.reversal_parity.targets import ParityTargetTransform
 
 
-class ParityEquivariantMPNN(MPNN):
+class _ParityMPNN(MPNN):
+    """What the parity-equivariant models share: the predictor runs on the fingerprints of the
+    input and of its reversal, stacked by :meth:`_paired_fingerprint`, and the two halves are
+    combined per column by parity. A subclass defines the reversal."""
+
+    _n_fingerprints = 1  # encoder fingerprints side by side in each row the predictor reads
+
+    def __init__(
+        self,
+        message_passing: MessagePassing,
+        agg: Aggregation,
+        predictor: Predictor,
+        target_transform: ParityTargetTransform,
+        batch_norm: bool = False,
+        **kwargs,
+    ):
+        if not isinstance(target_transform, ParityTargetTransform):
+            raise TypeError(
+                "target_transform must be a ParityTargetTransform, got "
+                f"{type(target_transform).__name__}"
+            )
+        # the uncertainty outputs in a pair's forward column are free: the forward pass gives
+        # those of the forward value, the reversed pass those of the reverse value
+        mask = build_parity_mask(
+            target_transform.task_parity, predictor, [p.forward for p in target_transform.pairs]
+        )
+        if not isinstance(predictor.output_transform, nn.Identity):
+            raise ValueError(
+                "The predictor has an output_transform. Leave it out: the target transform "
+                "scales the targets, after the forward and reversed predictions are combined."
+            )
+        width = self._n_fingerprints * message_passing.output_dim
+        if predictor.input_dim < width:
+            raise ValueError(
+                f"The predictor's input_dim is {predictor.input_dim}, but it receives {width} "
+                f"columns ({self._n_fingerprints} x message_passing.output_dim), plus any extra "
+                "descriptors X_d."
+            )
+
+        # The model owns a copy, in train mode like every freshly built module. The transform's
+        # mode decides between scaled and unscaled output, so a shared instance (an ensemble
+        # built from one transform) or one restored from a checkpoint saved in eval mode would
+        # otherwise make training fit unscaled predictions to scaled targets.
+        transform = copy.deepcopy(target_transform).train()
+        # Kept out of the init arguments Lightning collects from this frame, as chemprop does
+        # for X_d_transform: a module there is saved twice and triggers a warning.
+        target_transform = None
+        super().__init__(message_passing, agg, predictor, batch_norm, **kwargs)
+        self.hparams["target_transform"] = transform
+
+        self.target_transform = transform
+        self._powers = COMPONENT_POWERS[type(predictor)]
+        self.register_buffer("parity_mask", mask, persistent=False)
+        for metric in (self.criterion, self.metrics[-1]):
+            self._weigh_implied_members(metric)
+
+    def _weigh_implied_members(self, metric) -> None:
+        """Give the loss a weight for each pair's implied member, after the declared columns.
+
+        An implied reverse value takes its forward column's weight, an implied difference
+        weight 1. A single shared weight, the default, needs nothing; a loss restored from a
+        checkpoint already has the extra weights.
+        """
+        pairs = self.target_transform.pairs
+        w = metric.task_weights
+        if not pairs or w.numel() != self.target_transform.n_tasks or w.numel() == 1:
+            return
+        extra = [float(w[0, p.forward]) if p.difference is not None else 1.0 for p in pairs]
+        extra = torch.tensor([extra], dtype=w.dtype, device=w.device)
+        metric.task_weights = torch.cat((w, extra), dim=1)
+
+    @property
+    def task_parity(self) -> list[int]:
+        """Parity of each output head (``ODD``, ``EVEN`` or ``FREE``, from ``parity``)."""
+        return self.target_transform.task_parity
+
+    def _paired_fingerprint(self, bmg, V_d=None, X_d: Tensor | None = None) -> Tensor:
+        """Fingerprints of the batch and of its reversal, stacked as ``(2B, d)``."""
+        raise NotImplementedError
+
+    def _combine(self, preds: Tensor) -> Tensor:
+        """Combine ``(2B, ...)`` stacked predictions into ``(B, ...)`` using the parity mask."""
+        B = preds.shape[0] // 2
+        fwd, rev = preds[:B], preds[B:]
+        m = self.parity_mask
+        return torch.where(m == FREE, fwd, 0.5 * (fwd + m * rev))
+
+    def forward(self, bmg, V_d=None, X_d: Tensor | None = None) -> Tensor:
+        """Generate parity-equivariant predictions for the inputs"""
+        both = self.predictor(self._paired_fingerprint(bmg, V_d, X_d))
+        return self.target_transform(self._combine(both), self._powers, both[len(both) // 2 :])
+
+    def _train_preds(self, bmg, V_d=None, X_d: Tensor | None = None) -> Tensor:
+        """Combined ``predictor.train_step`` output, as the training objective sees it: the
+        scaled declared columns, followed by each pair's implied member."""
+        both = self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d))
+        return self.target_transform.loss_columns(self._combine(both), both[len(both) // 2 :])
+
+    def on_validation_model_eval(self) -> None:
+        # as chemprop does for the predictor's output transform: validation compares scaled
+        # predictions with scaled targets
+        super().on_validation_model_eval()
+        self.target_transform.train()
+
+    def _loss_inputs(self, batch: BatchType) -> tuple[Tensor, ...]:
+        """Scaled predictions and targets as the loss sees them, with each pair's implied
+        member appended after the declared columns."""
+        bmg, V_d, X_d, targets, weights, lt_mask, gt_mask = batch
+        preds = self._train_preds(bmg, V_d, X_d)
+        tf = self.target_transform
+        if tf.pairs:
+            implied = tf.implied(targets)
+            members = [[p.forward, p.second] for p in tf.pairs]
+            for m in (lt_mask, gt_mask):
+                if m is not None:  # a bound on either member gives no value for the third
+                    implied = implied.masked_fill(m[:, members].any(dim=2), float("nan"))
+            targets = torch.cat((targets, implied), dim=1)
+            none = torch.zeros_like(implied, dtype=torch.bool)
+            lt_mask = None if lt_mask is None else torch.cat((lt_mask, none), dim=1)
+            gt_mask = None if gt_mask is None else torch.cat((gt_mask, none), dim=1)
+        mask = targets.isfinite()
+        return preds, targets.nan_to_num(nan=0.0), mask, weights, lt_mask, gt_mask
+
+    # The parent's training/validation steps call `fingerprint` and `predictor.train_step`
+    # directly, bypassing `forward`; these mirror them with only the preds computation changed.
+    def training_step(self, batch: BatchType, batch_idx):
+        batch_size = self.get_batch_size(batch)
+        l = self.criterion(*self._loss_inputs(batch))
+
+        self.log("train_loss", self.criterion, batch_size=batch_size, prog_bar=True, on_epoch=True)
+
+        return l
+
+    def validation_step(self, batch: BatchType, batch_idx: int = 0):
+        self._evaluate_batch(batch, "val")
+
+        batch_size = self.get_batch_size(batch)
+        self.metrics[-1](*self._loss_inputs(batch))
+        self.log("val_loss", self.metrics[-1], batch_size=batch_size, prog_bar=True)
+
+
+class ParityEquivariantMPNN(_ParityMPNN):
     r"""An :class:`~chemprop.models.MPNN` that is exactly parity-equivariant under reversal.
 
     With :math:`g` the full stack (message passing, aggregation, batch norm, predictor) and
@@ -66,7 +209,8 @@ class ParityEquivariantMPNN(MPNN):
         if ``target_transform`` is not a :class:`ParityTargetTransform`.
     ValueError
         if the predictor is not one of the supported regression predictors, has an
-        ``output_transform``, or has a different number of tasks than ``target_transform``.
+        ``output_transform``, is narrower than the fingerprint, or has a different number of
+        tasks than ``target_transform``.
 
     Notes
     -----
@@ -112,60 +256,13 @@ class ParityEquivariantMPNN(MPNN):
             if start <= 0 or (dim is not None and start >= dim):
                 bound = f"{dim_key} = {dim}" if dim is not None else dim_key
                 raise ValueError(f"{name} must satisfy 0 < {name} < {bound}, got {start}")
-        if not isinstance(target_transform, ParityTargetTransform):
-            raise TypeError(
-                "target_transform must be a ParityTargetTransform, got "
-                f"{type(target_transform).__name__}"
-            )
-        # the uncertainty outputs in a pair's forward column are free: the forward pass gives
-        # those of the forward value, the reversed pass those of the reverse value
-        mask = build_parity_mask(
-            target_transform.task_parity, predictor, [p.forward for p in target_transform.pairs]
-        )
-        if not isinstance(predictor.output_transform, nn.Identity):
-            raise ValueError(
-                "The predictor has an output_transform. Leave it out: the target transform "
-                "scales the targets, after the forward and reversed predictions are combined."
-            )
-
-        # The model owns a copy, in train mode like every freshly built module. The transform's
-        # mode decides between scaled and unscaled output, so a shared instance (an ensemble
-        # built from one transform) or one restored from a checkpoint saved in eval mode would
-        # otherwise make training fit unscaled predictions to scaled targets.
-        transform = copy.deepcopy(target_transform).train()
-        # Kept out of the init arguments Lightning collects from this frame, as chemprop does
-        # for X_d_transform: a module there is saved twice and triggers a warning.
-        target_transform = None
-        super().__init__(message_passing, agg, predictor, batch_norm, **kwargs)
-        self.hparams["target_transform"] = transform
+        # as in the parent, the transform stays out of the init arguments Lightning collects
+        # from this frame
+        transform, target_transform = target_transform, None
+        super().__init__(message_passing, agg, predictor, transform, batch_norm, **kwargs)
 
         self.odd_atom_start = odd_atom_start
         self.odd_bond_start = odd_bond_start
-        self.target_transform = transform
-        self._powers = COMPONENT_POWERS[type(predictor)]
-        self.register_buffer("parity_mask", mask, persistent=False)
-        for metric in (self.criterion, self.metrics[-1]):
-            self._weigh_implied_members(metric)
-
-    def _weigh_implied_members(self, metric) -> None:
-        """Give the loss a weight for each pair's implied member, after the declared columns.
-
-        An implied reverse value takes its forward column's weight, an implied difference
-        weight 1. A single shared weight, the default, needs nothing; a loss restored from a
-        checkpoint already has the extra weights.
-        """
-        pairs = self.target_transform.pairs
-        w = metric.task_weights
-        if not pairs or w.numel() != self.target_transform.n_tasks or w.numel() == 1:
-            return
-        extra = [float(w[0, p.forward]) if p.difference is not None else 1.0 for p in pairs]
-        extra = torch.tensor([extra], dtype=w.dtype, device=w.device)
-        metric.task_weights = torch.cat((w, extra), dim=1)
-
-    @property
-    def task_parity(self) -> list[int]:
-        """Parity of each output head (``ODD``, ``EVEN`` or ``FREE``, from ``parity``)."""
-        return self.target_transform.task_parity
 
     @staticmethod
     def _as_start_index(name: str, value) -> int:
@@ -238,66 +335,96 @@ class ParityEquivariantMPNN(MPNN):
 
         return H if X_d is None else torch.cat((H, self.X_d_transform(X_d).repeat(2, 1)), dim=1)
 
-    def _combine(self, preds: Tensor) -> Tensor:
-        """Combine ``(2B, ...)`` stacked predictions into ``(B, ...)`` using the parity mask."""
-        B = preds.shape[0] // 2
-        fwd, rev = preds[:B], preds[B:]
-        m = self.parity_mask
-        return torch.where(m == FREE, fwd, 0.5 * (fwd + m * rev))
 
-    def forward(
-        self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
+class ParitySwapMPNN(_ParityMPNN):
+    r"""An :class:`~chemprop.models.MPNN` of an ordered pair of molecules :math:`(A, B)` that is
+    exactly parity-equivariant under their swap.
+
+    No atom mapping is used. One encoder (message passing, aggregation, batch norm) turns each
+    molecule into a fingerprint, :math:`h_A` and :math:`h_B`, and the predictor :math:`g` reads
+    the two side by side. Each output head is predicted as
+
+    - odd:  :math:`\tfrac12[g(h_A, h_B) - g(h_B, h_A)]`, so :math:`f(B, A) = -f(A, B)`
+    - even: :math:`\tfrac12[g(h_A, h_B) + g(h_B, h_A)]`, so :math:`f(B, A) = f(A, B)`
+    - free: :math:`g(h_A, h_B)`, which depends on the order in whatever way the data dictate
+
+    Pairs of columns, target scaling and uncertainty outputs behave as in
+    :class:`ParityEquivariantMPNN`, with the swap in place of the reversal: a pair's forward
+    value is that of :math:`(A, B)` and its reverse value that of :math:`(B, A)`.
+
+    Each molecule is encoded once, whichever side it is on. Batch norm acts on the fingerprints
+    of all molecules of both sides together, before they are put side by side, so that in
+    train mode its statistics do not depend on the order. The guarantee is exact whenever
+    dropout is inactive, as in ``eval()``.
+
+    Inputs are batches of a :class:`~chemprop.data.MulticomponentDataset` of two molecule
+    datasets, the first holding :math:`A` and the second :math:`B`, featurized with chemprop's
+    own molecule featurizer.
+
+    Parameters
+    ----------
+    message_passing : MessagePassing
+        a single block, which encodes both molecules (not a ``MulticomponentMessagePassing``)
+    agg, batch_norm, **kwargs
+        as for :class:`~chemprop.models.MPNN`
+    predictor : Predictor
+        ``RegressionFFN``, ``MveFFN``, ``EvidentialFFN`` or ``QuantileFFN``, without an
+        ``output_transform``, and with ``input_dim = 2 * message_passing.output_dim`` plus the
+        number of extra descriptors ``X_d``
+    target_transform : ParityTargetTransform
+        the parity of each target column and the target scaling; the model keeps a copy
+
+    Raises
+    ------
+    TypeError
+        if ``target_transform`` is not a :class:`ParityTargetTransform`.
+    ValueError
+        if the predictor is not one of the supported regression predictors, has an
+        ``output_transform``, is too narrow for two fingerprints, or has a different number of
+        tasks than ``target_transform``.
+
+    Notes
+    -----
+    Extra descriptors ``X_d`` belong to the pair and are passed identically to both orders, so
+    they must not depend on the order. Extra atom descriptors ``V_d`` follow their own molecule.
+
+    A side that holds several molecules is one dot-separated SMILES, read as a disconnected
+    graph.
+
+    :meth:`fingerprint` returns :math:`[h_A, h_B]`, followed by ``X_d`` if given, so it depends
+    on the order; the parity structure lives in the combination of predictor outputs.
+    """
+
+    _n_fingerprints = 2
+
+    def _paired_fingerprint(
+        self,
+        bmgs: Sequence[BatchMolGraph],
+        V_ds: Sequence[Tensor | None] | None = None,
+        X_d: Tensor | None = None,
     ) -> Tensor:
-        """Generate parity-equivariant predictions for the input reactions"""
-        both = self.predictor(self._paired_fingerprint(bmg, V_d, X_d))
-        return self.target_transform(self._combine(both), self._powers, both[len(both) // 2 :])
+        """Fingerprints of the pairs and of the swapped pairs, stacked as ``(2B, 2d)``: rows
+        :math:`[h_A, h_B]`, then rows :math:`[h_B, h_A]`."""
+        if len(bmgs) != 2:
+            raise ValueError(f"expected inputs of two components, (A, B), got {len(bmgs)}")
+        V_ds = (None, None) if V_ds is None else V_ds
+        H = torch.cat(
+            [self.agg(self.message_passing(bmg, V_d), bmg.batch) for bmg, V_d in zip(bmgs, V_ds)]
+        )
+        H = self.bn(H)  # rows: every A, then every B
+        H = torch.cat((H, H.roll(len(H) // 2, dims=0)), dim=1)
 
-    def _train_preds(
-        self, bmg: BatchMolGraph, V_d: Tensor | None = None, X_d: Tensor | None = None
+        return H if X_d is None else torch.cat((H, self.X_d_transform(X_d).repeat(2, 1)), dim=1)
+
+    def fingerprint(
+        self,
+        bmgs: Sequence[BatchMolGraph],
+        V_ds: Sequence[Tensor | None] | None = None,
+        X_d: Tensor | None = None,
     ) -> Tensor:
-        """Combined ``predictor.train_step`` output, as the training objective sees it: the
-        scaled declared columns, followed by each pair's implied member."""
-        both = self.predictor.train_step(self._paired_fingerprint(bmg, V_d, X_d))
-        return self.target_transform.loss_columns(self._combine(both), both[len(both) // 2 :])
+        """the learned fingerprints :math:`[h_A, h_B]` for the input pairs"""
+        H = self._paired_fingerprint(bmgs, V_ds, X_d)
+        return H[: len(H) // 2]
 
-    def on_validation_model_eval(self) -> None:
-        # as chemprop does for the predictor's output transform: validation compares scaled
-        # predictions with scaled targets
-        super().on_validation_model_eval()
-        self.target_transform.train()
-
-    def _loss_inputs(self, batch: BatchType) -> tuple[Tensor, ...]:
-        """Scaled predictions and targets as the loss sees them, with each pair's implied
-        member appended after the declared columns."""
-        bmg, V_d, X_d, targets, weights, lt_mask, gt_mask = batch
-        preds = self._train_preds(bmg, V_d, X_d)
-        tf = self.target_transform
-        if tf.pairs:
-            implied = tf.implied(targets)
-            members = [[p.forward, p.second] for p in tf.pairs]
-            for m in (lt_mask, gt_mask):
-                if m is not None:  # a bound on either member gives no value for the third
-                    implied = implied.masked_fill(m[:, members].any(dim=2), float("nan"))
-            targets = torch.cat((targets, implied), dim=1)
-            none = torch.zeros_like(implied, dtype=torch.bool)
-            lt_mask = None if lt_mask is None else torch.cat((lt_mask, none), dim=1)
-            gt_mask = None if gt_mask is None else torch.cat((gt_mask, none), dim=1)
-        mask = targets.isfinite()
-        return preds, targets.nan_to_num(nan=0.0), mask, weights, lt_mask, gt_mask
-
-    # The parent's training/validation steps call `fingerprint` and `predictor.train_step`
-    # directly, bypassing `forward`; these mirror them with only the preds computation changed.
-    def training_step(self, batch: BatchType, batch_idx):
-        batch_size = self.get_batch_size(batch)
-        l = self.criterion(*self._loss_inputs(batch))
-
-        self.log("train_loss", self.criterion, batch_size=batch_size, prog_bar=True, on_epoch=True)
-
-        return l
-
-    def validation_step(self, batch: BatchType, batch_idx: int = 0):
-        self._evaluate_batch(batch, "val")
-
-        batch_size = self.get_batch_size(batch)
-        self.metrics[-1](*self._loss_inputs(batch))
-        self.log("val_loss", self.metrics[-1], batch_size=batch_size, prog_bar=True)
+    def get_batch_size(self, batch: MulticomponentTrainingBatch) -> int:
+        return len(batch[0][0])

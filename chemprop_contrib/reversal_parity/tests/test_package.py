@@ -6,6 +6,7 @@ def test_package_is_importable_from_namespace():
         "reverse_bmg",
         "stack_reversed_bmg",
         "ParityEquivariantMPNN",
+        "ParitySwapMPNN",
         "ParityTargetTransform",
     } <= set(reversal_parity.__all__)
     for name in reversal_parity.__all__:

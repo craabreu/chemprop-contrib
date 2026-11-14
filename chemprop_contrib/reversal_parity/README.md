@@ -1,6 +1,6 @@
 # `reversal_parity`
 
-This `chemprop-contrib` package predicts properties of a transformation `A>>B` that behave **exactly** as they must when the transformation is reversed to `B>>A`. The transformation can be a chemical reaction or an alchemical transformation between two molecules, such as phenol → toluene. Either way it is given as atom-mapped SMILES and encoded as a Condensed Graph of Reaction (CGR).
+This `chemprop-contrib` package predicts properties of a transformation `A>>B` that behave **exactly** as they must when the transformation is reversed to `B>>A`. The transformation can be a chemical reaction or an alchemical transformation between two molecules, such as phenol → toluene. Either way it is given as atom-mapped SMILES and encoded as a Condensed Graph of Reaction (CGR). For two molecules with no atom map, `ParitySwapMPNN` enforces the same behavior under the swap of the two (see [Molecule pairs without atom mapping](#molecule-pairs-without-atom-mapping)).
 
 Many such properties have a fixed behavior under reversal. A reaction enthalpy or a relative solvation free energy changes sign,
 
@@ -134,6 +134,74 @@ Chemprop's CGR featurizer writes each atom's element once, since a mapped atom k
 
 Use it for chemical reactions only. Featurizing a reaction in which a mapped atom changes element raises `ValueError`, since the odd block has no element columns to record the change. Unmapped atoms that vanish or appear are allowed. For a fully mapped chemical reaction the option changes no information: without it, $d$ is zero in the element columns anyway, and the option drops those columns. It differs only for unmapped atoms, whose absent side carries the element with the option and is a zero dummy atom without it.
 
+## Molecule pairs without atom mapping
+
+`ParitySwapMPNN` gives the same guarantees for an ordered pair of molecules $(A, B)$ that has no atom map, with the swap $(A, B) \to (B, A)$ in place of the reversal. One encoder (shared weights) turns each molecule into a fingerprint, $h_A$ and $h_B$, and the predictor $g$ reads the two side by side. Its outputs are combined per column as before:
+
+| Declaration | Prediction | Behavior under the swap |
+|---|---|---|
+| `odd=[i]` | $\tfrac12[g(h_A, h_B) - g(h_B, h_A)]$ | $f_i(B, A) = -f_i(A, B)$ |
+| `even=[i]` | $\tfrac12[g(h_A, h_B) + g(h_B, h_A)]$ | $f_i(B, A) = f_i(A, B)$ |
+| not listed | $g(h_A, h_B)$ | depends on the order, in whatever way the data dictate |
+
+`paired_reverse`, `paired_difference`, the target scaling and the uncertainty predictors work as described above, with $(B, A)$ in the role of $\bar{x}$.
+
+The molecules are featurized with Chemprop's own molecule featurizer, and the data are a `MulticomponentDataset` of two `MoleculeDataset`s, the first holding $A$ and the second $B$:
+
+```python
+import csv
+
+import lightning.pytorch as pl
+from chemprop.data import (
+    MoleculeDatapoint, MoleculeDataset, MulticomponentDataset, build_dataloader,
+)
+from chemprop.nn import BondMessagePassing, MeanAggregation, RegressionFFN
+
+from chemprop_contrib.reversal_parity import ParitySwapMPNN, ParityTargetTransform
+
+# columns: relative solvation free energy ddG(A -> B) (odd), a similarity score (even)
+cols = ["ddG", "similarity"]
+with open("pairs.csv") as f:  # SMILES in "smiles_a" and "smiles_b", no atom mapping
+    rows = list(csv.DictReader(f))
+ys = [[float(r[c]) for c in cols] for r in rows]
+
+
+def dataset(rows, ys):  # the first component holds A and the targets, the second holds B
+    A = MoleculeDataset([MoleculeDatapoint.from_smi(r["smiles_a"], y=y) for r, y in zip(rows, ys)])
+    B = MoleculeDataset([MoleculeDatapoint.from_smi(r["smiles_b"]) for r in rows])
+    return MulticomponentDataset([A, B])
+
+
+n_train = int(0.8 * len(rows))
+train_dset = dataset(rows[:n_train], ys[:n_train])
+val_dset = dataset(rows[n_train:], ys[n_train:])
+
+target = ParityTargetTransform.fit(train_dset.datasets[0].Y, odd=[0], even=[1])
+train_dset.normalize_targets(target.to_standard_scaler())
+val_dset.normalize_targets(target.to_standard_scaler())
+
+mp = BondMessagePassing()  # one block, which encodes both molecules
+predictor = RegressionFFN(n_tasks=len(cols), input_dim=2 * mp.output_dim)  # two fingerprints
+model = ParitySwapMPNN(mp, MeanAggregation(), predictor, target, batch_norm=True)
+
+train_loader = build_dataloader(train_dset, batch_size=8, num_workers=0)
+val_loader = build_dataloader(val_dset, batch_size=8, num_workers=0, shuffle=False)
+trainer = pl.Trainer(max_epochs=2, accelerator="cpu", logger=False, enable_checkpointing=False)
+trainer.fit(model, train_loader, val_loader)
+
+preds = trainer.predict(model, val_loader)  # list of (batch, n_tasks) tensors, unscaled
+```
+
+What differs from the CGR model:
+
+- **One message-passing block, and a predictor twice as wide.** Pass a single `MessagePassing` (not a `MulticomponentMessagePassing`), so that both molecules go through the same weights, and give the predictor `input_dim = 2 * mp.output_dim`, plus the width of `X_d` if used.
+- **Targets and `X_d` are read from the first dataset**, as Chemprop does for multicomponent data. `X_d` belongs to the pair and is passed identically to both orders, so it must not depend on the order. Per-atom `V_d` follows its own molecule.
+- **A side may hold several molecules**, written as one dot-separated SMILES (a disconnected graph).
+- **Batch norm keeps exactness in train mode.** It acts on the fingerprints of all molecules of both sides together, before they are put side by side, so its batch statistics do not depend on the order. Dropout breaks exactness while active, as for the CGR model.
+- **`fingerprint` returns $[h_A, h_B]$**, twice as wide as the encoder output and dependent on the order.
+
+The swap model sees two whole molecules, and the CGR model sees what changes atom by atom. Use the swap model when there is no atom map, or no meaningful correspondence between the atoms of the two molecules.
+
 ## Things to know
 
 **Use `ParityCGRFeaturizer`, not Chemprop's CGR featurizer.** Chemprop's `CondensedGraphOfReactionFeaturizer` is not in the $(m, d)$ basis, and a model built for it gives predictions on real reversed reactions that are only approximately odd or even. `ParityEquivariantMPNN.from_featurizer` raises `TypeError` for any other featurizer; the plain constructor only sees dimensions and offsets and cannot check this.
@@ -150,20 +218,21 @@ Use it for chemical reactions only. Featurizing a reaction in which a mapped ato
 
 **`fingerprint` is direction-dependent.** `model.fingerprint(...)` returns the forward-direction fingerprint only, with the usual shape. The parity structure lives in the combination of predictor outputs, not in the fingerprint.
 
-**Loading saved models.** Use `ParityEquivariantMPNN.load_from_file` or `ParityEquivariantMPNN.load_from_checkpoint`. Chemprop's generic `MPNN.load_from_file`, `chemprop.models.utils.load_model` and the `chemprop predict` and `chemprop fingerprint` CLIs cannot rebuild this class (they raise a `TypeError` about `odd_atom_start`). **Never use `MPNN.load_from_checkpoint`:** Lightning silently drops the parity hyperparameters and returns a plain `MPNN`, whose predictions differ and have no parity guarantee.
+**Loading saved models.** Use `ParityEquivariantMPNN.load_from_file` or `ParityEquivariantMPNN.load_from_checkpoint`. Chemprop's generic `MPNN.load_from_file`, `chemprop.models.utils.load_model` and the `chemprop predict` and `chemprop fingerprint` CLIs cannot rebuild this class (they raise a `TypeError` about `odd_atom_start`). **Never use `MPNN.load_from_checkpoint`:** Lightning silently drops the parity hyperparameters and returns a plain `MPNN`, whose predictions differ and have no parity guarantee. Load a `ParitySwapMPNN` with its own `load_from_file` or `load_from_checkpoint` in the same way; Chemprop's generic loaders cannot rebuild it either.
 
 ## Unsupported combinations
 
 Construction raises `ValueError` for:
 
 - predictors outside `RegressionFFN`, `MveFFN`, `EvidentialFFN` and `QuantileFFN`. The uncertainty outputs (variance, evidential parameters, quantile interval) of an odd or even task are combined as even, so they stay valid; those of a free task are free, like its prediction;
-- a predictor with its own `output_transform`, or a different number of tasks than the target transform.
+- a predictor with its own `output_transform`, or a different number of tasks than the target transform;
+- a predictor whose `input_dim` is smaller than what it reads from the encoder: `message_passing.output_dim`, or twice that for `ParitySwapMPNN`.
 
 `ParityTargetTransform` raises `ValueError` for indices out of range (floats and booleans are rejected, not truncated), a column given two roles (including a forward column in both `paired_reverse` and `paired_difference`), and a scaling that breaks the declaration (a nonzero mean on an odd or difference column, or different scalings for the two directions of a pair).
 
 Training and prediction raise `TypeError` for a batch class that carries fields or attributes beyond those of chemprop's `BatchMolGraph`, since the stacked batch would silently leave them out.
 
-Reaction-plus-molecule inputs (for example a reaction with a solvent, via `MulticomponentMPNN`) are not supported: `ParityEquivariantMPNN` takes a single reaction graph.
+Reaction-plus-molecule inputs (for example a reaction with a solvent, via `MulticomponentMPNN`) are not supported: `ParityEquivariantMPNN` takes a single reaction graph. `ParitySwapMPNN` takes exactly two molecule components and raises `ValueError` for any other number.
 
 `CuikmolmakerCGRFeaturizer` is not supported, since it cannot express the $(m, d)$ layout. There is no CLI integration; use the Python API.
 
